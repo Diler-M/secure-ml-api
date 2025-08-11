@@ -1,0 +1,65 @@
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falco-config
+  namespace: falco
+data:
+  falco.yaml: |
+    rules_file: /etc/falco/falco_rules.yaml
+    syscalls_buffer_size: 32768
+    log_stderr: true
+    log_syslog: true
+    priority: debug
+    stdout_output:
+      enabled: true
+    syslog_output:
+      enabled: false
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: falco
+  namespace: falco
+spec:
+  selector:
+    matchLabels:
+      app: falco
+  template:
+    metadata:
+      labels:
+        app: falco
+    spec:
+      containers:
+      - name: falco
+        image: falcosecurity/falco:latest
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: dev
+          mountPath: /host/dev
+        - name: proc
+          mountPath: /host/proc
+        - name: boot
+          mountPath: /boot
+        - name: lib-modules
+          mountPath: /lib/modules
+        - name: etc-falco
+          mountPath: /etc/falco
+      volumes:
+      - name: dev
+        hostPath:
+          path: /dev
+      - name: proc
+        hostPath:
+          path: /proc
+      - name: boot
+        hostPath:
+          path: /boot
+      - name: lib-modules
+        hostPath:
+          path: /lib/modules
+      - name: etc-falco
+        configMap:
+          name: falco-config
