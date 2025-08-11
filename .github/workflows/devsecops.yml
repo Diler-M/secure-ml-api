@@ -1,5 +1,10 @@
 name: DevSecOps Pipeline - SAST / SCA / DAST / Build & Push
 
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
 on:
   push:
     branches: [ main ]
