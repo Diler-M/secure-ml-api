@@ -38,6 +38,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Build the image locally so Trivy can scan it
       - name: Build Docker image for scan
         run: docker build -t secure-ml-api:latest .
 
@@ -58,43 +59,47 @@ jobs:
           exit-code: '0'
           ignore-unfixed: true
 
-  # -------------------- DAST --------------------
+  # -------------------- DAST (Informational) --------------------
   zap_scan:
-    name: OWASP ZAP Baseline Scan
+    name: OWASP ZAP Baseline Scan (Reports Only)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Create shared network
-        run: docker network create zapnet
-
-      - name: Start API in background
+      - name: Create shared network & start API
         run: |
+          docker network create zapnet
           docker build -t secure-ml-api .
           docker run -d --network zapnet --name api secure-ml-api
           echo "Waiting for API to start..."
           sleep 30
 
+      # Run ZAP in same network and write reports into a writable host folder
       - name: Run OWASP ZAP Baseline Scan in same network
         continue-on-error: true
         run: |
+          mkdir -p zap-reports
           docker run --network zapnet \
-            -v $(pwd):/zap/wrk:rw \
+            -v "$PWD/zap-reports:/zap/wrk:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py -t http://api:8000/docs \
-            -J report_json.json -w report_md.md -r report_html.html -a
+            zap-baseline.py \
+              -t http://api:8000/docs \
+              -J zap-report.json \
+              -w zap-report.md \
+              -r zap-report.html \
+              -a
+
+      - name: List generated reports (debug)
+        run: ls -lah zap-reports || true
 
       - name: Upload ZAP Reports as Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: zap-reports
-          path: |
-            report_html.html
-            report_json.json
-            report_md.md
+          path: zap-reports/*
 
-  # -------------------- Docker Build & Push --------------------
+  # -------------------- Build & Push --------------------
   docker_push:
     name: Build & Push Docker Image
     runs-on: ubuntu-latest
@@ -115,7 +120,7 @@ jobs:
       - name: Push Docker image
         run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/secure-ml-api:latest
 
-  # -------------------- Terraform Plan (Review Only) --------------------
+  # -------------------- Terraform Plan (manual apply later) --------------------
   terraform_plan:
     name: Terraform Plan (Review Only)
     runs-on: ubuntu-latest
