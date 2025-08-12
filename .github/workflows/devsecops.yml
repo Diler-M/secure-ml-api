@@ -1,16 +1,14 @@
-name: DevSecOps Pipeline
+name: Secure ML API CI/CD Pipeline
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ main ]
 
 permissions:
   contents: read
   security-events: write
-  id-token: write
-  pull-requests: write
 
 jobs:
   codeql-analysis:
@@ -21,62 +19,97 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v2
         with:
           languages: python
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v2
+
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v2
+
+  dependency-review:
+    name: Dependency Review (PR gate)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
 
   trivy-scan:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - name: Run Trivy scan on Docker image
-        uses: aquasecurity/trivy-action@0.14.0
+      - uses: actions/checkout@v4
+
+      # Cache the Trivy vulnerability database
+      - name: Cache Trivy DB
+        uses: actions/cache@v3
         with:
-          image-ref: "dilerm13/secure-ml-api:latest"
-          format: 'table'
-          severity: 'HIGH,CRITICAL'
+          path: ~/.cache/trivy
+          key: ${{ runner.os }}-trivy-db
+
+      - name: Run Trivy scan on docker image
+        run: |
+          trivy image \
+            --format table \
+            --output trivy-results.txt \
+            --vuln-type os,library \
+            --severity HIGH,CRITICAL \
+            --timeout 10m \
+            dilerm13/secure-ml-api:latest
+
+      - name: Upload Trivy Scan results
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-scan-report
+          path: trivy-results.txt
 
   zap-scan:
     name: OWASP ZAP Baseline Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - name: Create zap-reports directory
+      - uses: actions/checkout@v4
+
+      - name: Create report directory
         run: mkdir -p zap-reports
+
       - name: Run OWASP ZAP Baseline Scan
         run: |
-          docker run --network host \
-            -v $(pwd)/zap-reports:/zap/wrk/:rw \
+          docker run --network="host" \
+            -v $(pwd)/zap-reports:/zap/wrk:rw \
             ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py -t http://localhost:8000/docs \
-            -J zap-reports/report.json \
-            -w zap-reports/report.md \
-            -r zap-reports/report.html || true
-      - name: Upload ZAP Reports
+            zap-baseline.py \
+              -t http://localhost:8000 \
+              -I \
+              -r zap-report.html || true
+
+      - name: Upload ZAP Scan results
         uses: actions/upload-artifact@v4
         with:
-          name: zap-scan-results
+          name: zap-scan-report
           path: zap-reports/*
 
-  terraform:
-    name: Terraform Plan (manual apply)
+  terraform-plan:
+    name: Terraform Plan (review only)
     runs-on: ubuntu-latest
-    needs: [codeql-analysis, trivy-scan, zap-scan]
+    needs: [trivy-scan, codeql-analysis]
     steps:
-      - uses: actions/checkout@v3
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          role-to-assume: arn:aws:iam::<ACCOUNT_ID>:role/<ROLE_NAME>
-          aws-region: us-east-1
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+
       - name: Terraform Init
         run: terraform init
-      - name: Terraform Plan (with secure CIDR)
-        run: terraform plan -var="allowed_cidr=${{ secrets.ALLOWED_CIDR }}"
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan
+
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: tfplan
