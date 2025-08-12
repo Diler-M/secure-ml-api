@@ -6,17 +6,17 @@ on:
   pull_request:
     branches: [ "main" ]
 
-# Default to no permissions; each job gets the minimum it needs for the upmost security
+# Default to no permissions; each job gets the minimum it needs for security
 permissions: {}
 
 jobs:
-  # -------------------- REQUIRED: SAST --------------------
+  # -------------------- SAST --------------------
   codeql-analysis:
     name: Perform CodeQL Analysis
     runs-on: ubuntu-latest
     permissions:
-      contents: read            # read repo
-      security-events: write    # upload SARIF to Security tab
+      contents: read
+      security-events: write
       actions: read
     steps:
       - uses: actions/checkout@v4
@@ -25,16 +25,15 @@ jobs:
           languages: python
       - uses: github/codeql-action/analyze@v3
 
-  # -------------------- REQUIRED: SCA (image + IaC) --------------------
+  # -------------------- SCA --------------------
   trivy-scan:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
     permissions:
-      contents: read            # read Dockerfile / IaC
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
-      # Build image locally so Trivy can scan it
       - name: Build Docker image for Trivy scan
         run: docker build -t secure-ml-api:latest .
 
@@ -43,7 +42,7 @@ jobs:
         with:
           image-ref: secure-ml-api:latest
           format: table
-          exit-code: 0               # do not fail CI; allows me the option to use branch protection to gate if desired
+          exit-code: 0
           ignore-unfixed: true
           vuln-type: os,library
           severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
@@ -57,7 +56,7 @@ jobs:
           exit-code: 0
           ignore-unfixed: true
 
-  # -------------------- REQUIRED: Dependency Review (PRs) --------------------
+  # -------------------- Dependency Review --------------------
   dependency-review:
     name: Dependency Review (PR gate)
     runs-on: ubuntu-latest
@@ -72,12 +71,13 @@ jobs:
           fail-on-severity: high
           comment-summary-in-pr: true
 
-  # -------------------- INFORMATIONAL: DAST (ZAP) --------------------
+  # -------------------- DAST --------------------
   zap-baseline-scan:
     name: OWASP ZAP Baseline Scan (Reports Only)
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    needs: [codeql-analysis, trivy-scan, dependency-review]  # Wait for all scans before running
     steps:
       - uses: actions/checkout@v4
 
@@ -88,8 +88,9 @@ jobs:
           docker run -d --network zapnet --name api secure-ml-api
           echo "Waiting for API to start..."
           sleep 30
+
       - name: ZAP Baseline (same network, writeable reports)
-        continue-on-error: true     # never block merges for project purposes 
+        continue-on-error: true
         run: |
           mkdir -p zap-reports
           chmod 777 zap-reports
@@ -103,19 +104,20 @@ jobs:
               -w zap-report.md \
               -r zap-report.html \
               -a
+
       - name: Upload ZAP Reports
         uses: actions/upload-artifact@v4
         with:
           name: zap-scan-reports
           path: zap-reports/*
 
-  # -------------------- PLAN ONLY: Terraform (manual apply later) --------------------
+  # -------------------- Terraform Plan --------------------
   terraform-plan:
     name: Terraform Plan (Review Only)
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: [codeql-analysis, trivy-scan, dependency-review]  
+    needs: [zap-baseline-scan]  # Run last, after ZAP scan
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
