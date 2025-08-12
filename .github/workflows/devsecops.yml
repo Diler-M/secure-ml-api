@@ -1,141 +1,125 @@
-name: Secure ML API CI/CD
+name: DevSecOps Pipeline
 
 on:
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-  workflow_dispatch:
+
+# Default to no permissions; each job gets the minimum it needs for the upmost security
+permissions: {}
 
 jobs:
-  codeql:
-    name: CodeQL (SAST)
+  # -------------------- REQUIRED: SAST --------------------
+  codeql-analysis:
+    name: Perform CodeQL Analysis
     runs-on: ubuntu-latest
     permissions:
-      security-events: write
+      contents: read            # read repo
+      security-events: write    # upload SARIF to Security tab
       actions: read
-      contents: read
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
         with:
           languages: python
+      - uses: github/codeql-action/analyze@v3
 
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
-
-  trivy:
-    name: Trivy Image Scan
+  # -------------------- REQUIRED: SCA (image + IaC) --------------------
+  trivy-scan:
+    name: Trivy Security Scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read            # read Dockerfile / IaC
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Cache Trivy DB
-        uses: actions/cache@v3
+      # Build image locally so Trivy can scan it
+      - name: Build Docker image for Trivy scan
+        run: docker build -t secure-ml-api:latest .
+
+      - name: Trivy (Image)
+        uses: aquasecurity/trivy-action@0.12.0
         with:
-          path: ~/.cache/trivy
-          key: ${{ runner.os }}-trivy-db
+          image-ref: secure-ml-api:latest
+          format: table
+          exit-code: 0               # do not fail CI; allows me the option to use branch protection to gate if desired
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
 
-      - name: Docker login (optional)
-        run: |
-          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
-            echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-            echo "Logged into Docker Hub."
-          else
-            echo "Docker Hub credentials not set, skipping login."
-          fi
-
-      - name: Pull Docker image
-        run: docker pull ${{ secrets.DOCKERHUB_USERNAME }}/secure-ml-api:latest
-
-      - name: Run Trivy scan
-        run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v $HOME/.cache/trivy:/root/.cache/ \
-            aquasec/trivy:latest image \
-            --timeout 10m \
-            --format table \
-            --vuln-type os,library \
-            --severity HIGH,CRITICAL \
-            ${{ secrets.DOCKERHUB_USERNAME }}/secure-ml-api:latest | tee trivy-results.txt
-
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v $HOME/.cache/trivy:/root/.cache/ \
-            aquasec/trivy:latest image \
-            --timeout 10m \
-            --format template \
-            --template "@contrib/html.tpl" \
-            --output trivy-results.html \
-            ${{ secrets.DOCKERHUB_USERNAME }}/secure-ml-api:latest
-
-      - name: Upload Trivy scan results
-        uses: actions/upload-artifact@v4
+      - name: Trivy (Terraform IaC)
+        uses: aquasecurity/trivy-action@0.12.0
         with:
-          name: trivy-results
-          path: |
-            trivy-results.txt
-            trivy-results.html
+          scan-type: fs
+          scan-ref: terraform-deployment
+          format: table
+          exit-code: 0
+          ignore-unfixed: true
 
-  zap:
-    name: OWASP ZAP DAST
+  # -------------------- REQUIRED: Dependency Review (PRs) --------------------
+  dependency-review:
+    name: Dependency Review (PR gate)
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: true
 
-      - name: Pull & run API container
+  # -------------------- INFORMATIONAL: DAST (ZAP) --------------------
+  zap-baseline-scan:
+    name: OWASP ZAP Baseline Scan (Reports Only)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Docker network & start API
         run: |
-          docker run -d --name api -p 8000:8000 ${{ secrets.DOCKERHUB_USERNAME }}/secure-ml-api:latest
-          for i in {1..10}; do
-            if curl -s http://localhost:8000 > /dev/null; then
-              echo "API is up"
-              break
-            fi
-            echo "Waiting for API..."
-            sleep 3
-          done
-
-      - name: Run OWASP ZAP Baseline Scan
+          docker network create zapnet || true
+          docker build -t secure-ml-api .
+          docker run -d --network zapnet --name api secure-ml-api
+          echo "Waiting for API to start..."
+          sleep 30
+      - name: ZAP Baseline (same network, writeable reports)
+        continue-on-error: true     # never block merges for project purposes 
         run: |
           mkdir -p zap-reports
-          docker run --rm --network=host \
-            -v $(pwd)/zap-reports:/zap/wrk/:rw \
+          chmod 777 zap-reports
+          docker run --rm \
+            --network zapnet \
+            -v "$PWD/zap-reports:/zap/wrk:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py -t http://localhost:8000 -r zap-report.html || true
-
-      - name: Upload ZAP reports
+            zap-baseline.py \
+              -t http://api:8000/docs \
+              -J zap-report.json \
+              -w zap-report.md \
+              -r zap-report.html \
+              -a
+      - name: Upload ZAP Reports
         uses: actions/upload-artifact@v4
         with:
-          name: zap-report
-          path: zap-reports/zap-report.html
+          name: zap-scan-reports
+          path: zap-reports/*
 
-  terraform:
+  # -------------------- PLAN ONLY: Terraform (manual apply later) --------------------
+  terraform-plan:
     name: Terraform Plan (Review Only)
     runs-on: ubuntu-latest
-    needs: [codeql, trivy, zap] # Run last after scans
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      TF_VAR_docker_image: "${{ secrets.DOCKERHUB_USERNAME }}/secure-ml-api:latest"
-      TF_VAR_allowed_cidr: ${{ secrets.ALLOWED_CIDR }}
+    permissions:
+      contents: read
+    needs: [codeql-analysis, trivy-scan, dependency-review]  
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
       - name: Terraform Init
-        run: terraform init
-
+        run: terraform -chdir=terraform-deployment init
       - name: Terraform Plan
-        run: terraform plan -out=tfplan
+        run: terraform -chdir=terraform-deployment plan
