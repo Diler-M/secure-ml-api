@@ -66,19 +66,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Create shared network for API + ZAP
       - name: Start API in background
         run: |
+          docker network create zapnet
           docker build -t secure-ml-api .
-          docker run -d -p 8000:8000 secure-ml-api
-          sleep 15  # allow API to start
+          docker run -d --network zapnet --name api secure-ml-api
+          echo "Waiting for API to start..."
+          sleep 30
 
+      # Run ZAP in same network, pointing to container name
       - name: Run OWASP ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.11.0
         with:
-          target: 'http://localhost:8000/docs'
+          target: 'http://api:8000/docs'
           cmd_options: '-a'
           issue_title: "OWASP ZAP Baseline Report"
           fail_action: false
+        env:
+          DOCKER_NETWORK: zapnet
 
       - name: Upload ZAP Reports as Artifacts
         uses: actions/upload-artifact@v4
@@ -110,7 +116,7 @@ jobs:
       - name: Push Docker image
         run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/secure-ml-api:latest
 
-  # -------------------- Terraform Plan (Manual Apply) --------------------
+  # -------------------- Terraform Plan (Review Only) --------------------
   terraform_plan:
     name: Terraform Plan (Review Only)
     runs-on: ubuntu-latest
