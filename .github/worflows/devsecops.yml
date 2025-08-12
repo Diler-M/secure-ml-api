@@ -38,6 +38,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ✅ Build the image so it exists before scanning
+      - name: Build Docker image for scan
+        run: docker build -t secure-ml-api:latest .
+
       - name: Run Trivy on Docker image
         uses: aquasecurity/trivy-action@0.12.0
         with:
@@ -63,9 +67,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ✅ Use correct build path (root in this example)
       - name: Start API in background
         run: |
-          docker build -t secure-ml-api ./secure-ml-api
+          docker build -t secure-ml-api .
           docker run -d -p 8000:8000 secure-ml-api
           sleep 15  # give app time to start
 
@@ -102,7 +107,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build Docker image
-        run: docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/secure-ml-api:latest ./secure-ml-api
+        run: docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/secure-ml-api:latest .
 
       - name: Push Docker image
         run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/secure-ml-api:latest
