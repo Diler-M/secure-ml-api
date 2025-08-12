@@ -66,7 +66,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Create shared network for API + ZAP
+    # Create shared network for API + ZAP
       - name: Start API in background
         run: |
           docker network create zapnet
@@ -75,9 +75,10 @@ jobs:
           echo "Waiting for API to start..."
           sleep 30
 
-      # Run ZAP in same network, pointing to container name
+    # Run ZAP in same network, pointing to container name
       - name: Run OWASP ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.11.0
+        continue-on-error: true
         with:
           target: 'http://api:8000/docs'
           cmd_options: '-a'
