@@ -5,8 +5,9 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
-# Default to no permissions; each job gets the minimum it needs for security
+# Default to no permissions; each job gets the minimum it needs
 permissions: {}
 
 jobs:
@@ -25,7 +26,7 @@ jobs:
           languages: python
       - uses: github/codeql-action/analyze@v3
 
-  # -------------------- SCA --------------------
+  # -------------------- SCA (Image + IaC) --------------------
   trivy-scan:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
@@ -56,7 +57,7 @@ jobs:
           exit-code: 0
           ignore-unfixed: true
 
-  # -------------------- Dependency Review --------------------
+  # -------------------- Dependency Review (PRs only) --------------------
   dependency-review:
     name: Dependency Review (PR gate)
     runs-on: ubuntu-latest
@@ -75,9 +76,10 @@ jobs:
   zap-baseline-scan:
     name: OWASP ZAP Baseline Scan (Reports Only)
     runs-on: ubuntu-latest
+    # IMPORTANT: depend only on jobs that always run on both push and PR
+    needs: [codeql-analysis, trivy-scan]
     permissions:
       contents: read
-    needs: [codeql-analysis, trivy-scan, dependency-review]  # Wait for all scans before running
     steps:
       - uses: actions/checkout@v4
 
@@ -87,7 +89,13 @@ jobs:
           docker build -t secure-ml-api .
           docker run -d --network zapnet --name api secure-ml-api
           echo "Waiting for API to start..."
-          sleep 30
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8000/docs >/dev/null; then
+              echo "API is up"
+              break
+            fi
+            sleep 2
+          done
 
       - name: ZAP Baseline (same network, writeable reports)
         continue-on-error: true
@@ -99,25 +107,31 @@ jobs:
             -v "$PWD/zap-reports:/zap/wrk:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
-              -t http://api:8000/docs \
+              -t http://api:8000 \
               -J zap-report.json \
               -w zap-report.md \
               -r zap-report.html \
               -a
 
       - name: Upload ZAP Reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: zap-scan-reports
           path: zap-reports/*
 
-  # -------------------- Terraform Plan --------------------
+      - name: Cleanup API container
+        if: always()
+        run: docker rm -f api || true
+
+  # -------------------- Terraform Plan (runs last) --------------------
   terraform-plan:
     name: Terraform Plan (Review Only)
     runs-on: ubuntu-latest
+    # Make Terraform run last
+    needs: [zap-baseline-scan]
     permissions:
       contents: read
-    needs: [zap-baseline-scan]  # Run last, after ZAP scan
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
