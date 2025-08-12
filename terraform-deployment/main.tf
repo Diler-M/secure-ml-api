@@ -15,7 +15,7 @@ resource "aws_security_group" "ecs_sg" {
     from_port   = var.container_port
     to_port     = var.container_port
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.allowed_cidr]
   }
   egress {
     from_port   = 0
@@ -34,10 +34,10 @@ resource "aws_lb" "ecs_lb" {
 }
 
 resource "aws_lb_target_group" "ecs_tg" {
-  name     = "secure-ml-tg"
-  port     = var.container_port
-  protocol = "HTTP"
-  vpc_id   = aws_vpc.main.id
+  name        = "secure-ml-tg"
+  port        = var.container_port
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.main.id
   target_type = "ip"
 }
 
@@ -79,11 +79,11 @@ resource "aws_iam_role_policy_attachment" "ecs_execution_policy" {
 resource "aws_ecs_task_definition" "secure_ml_task" {
   family                   = "secure-ml-task"
   requires_compatibilities = ["FARGATE"]
-  network_mode            = "awsvpc"
-  cpu                     = "256"
-  memory                  = "512"
-  execution_role_arn      = aws_iam_role.ecs_task_execution_role.arn
-  container_definitions   = jsonencode([{
+  network_mode             = "awsvpc"
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+  container_definitions    = jsonencode([{
     name      = "secure-ml-api",
     image     = var.docker_image,
     essential = true,

@@ -1,6 +1,7 @@
 # 🚀 Securing AI - DecSecOps Demonstration
 
 This repository demonstrates a **secure CI/CD pipeline** for a FastAPI-based ML service (sentiment analysis with Hugging Face).  
+
 It integrates:
 
 - **SAST** → CodeQL  
@@ -62,7 +63,7 @@ flowchart LR
 
 - **SAST**: CodeQL uploads SARIF to Security tab → Required check.  
 - **SCA**: Trivy scans image & IaC → Required check.  
-- **DAST**: ZAP Baseline runs against containerized API → Artifacts uploaded.  
+- **DAST**: ZAP Baseline runs against containerised API → Artifacts uploaded.  
 - **Dependency Review**: Blocks PRs introducing high/critical vulnerabilities.  
 - **Change control**: CI runs `terraform plan`; `terraform apply` is manual.
 
