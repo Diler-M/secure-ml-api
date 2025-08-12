@@ -6,20 +6,29 @@ on:
   pull_request:
     branches: [ "main" ]
 
+# Default to no permissions for maximum security
+permissions: {}
+
 jobs:
   codeql-analysis:
     name: Perform CodeQL Analysis
     runs-on: ubuntu-latest
+    permissions:
+      contents: read              # Required to read code
+      security-events: write      # Required to upload SARIF results
+      actions: read               # Optional: lets CodeQL check workflow context
     steps:
       - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v2
+      - uses: github/codeql-action/init@v3
         with:
           languages: python
-      - uses: github/codeql-action/analyze@v2
+      - uses: github/codeql-action/analyze@v3
 
   trivy-scan:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read              # Only needs repo read access for Dockerfile
     steps:
       - uses: actions/checkout@v4
       - name: Build Docker image for Trivy scan
@@ -35,40 +44,39 @@ jobs:
           severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
 
   zap-baseline-scan:
-    name: OWASP ZAP Baseline Scan
+    name: OWASP ZAP Baseline Scan (Reports Only)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read              # Only needs read access to repo files
     steps:
       - uses: actions/checkout@v4
 
-      # Create Docker network if testing locally
-      - name: Create Docker Network
-        run: docker network create zapnet || true
-
-      # Start API container in background (replace this with your service build)
-      - name: Start API Container
+      - name: Create Docker network & start API
         run: |
-          docker build -t myapi .
-          docker run -d --name api --network zapnet -p 8000:8000 myapi
+          docker network create zapnet || true
+          docker build -t secure-ml-api .
+          docker run -d --network zapnet --name api secure-ml-api
+          echo "Waiting for API to start..."
+          sleep 30
 
-      # Run ZAP Baseline Scan
-      - name: Run OWASP ZAP Baseline Scan
+      - name: Run OWASP ZAP Baseline Scan in same network
+        continue-on-error: true
         run: |
           mkdir -p zap-reports
           chmod 777 zap-reports
-
           docker run --rm \
-            -v $(pwd)/zap-reports:/zap/wrk \
             --network zapnet \
+            -v "$PWD/zap-reports:/zap/wrk:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
               -t http://api:8000/docs \
               -J zap-report.json \
               -w zap-report.md \
               -r zap-report.html \
-              -a || true
+              -a
 
       - name: List generated ZAP reports
-        run: ls -lah zap-reports
+        run: ls -lah zap-reports || true
 
       - name: Upload ZAP Reports
         uses: actions/upload-artifact@v4
