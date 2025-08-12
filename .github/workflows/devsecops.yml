@@ -6,17 +6,18 @@ on:
   pull_request:
     branches: [ "main" ]
 
-# Default to no permissions for maximum security
+# Default to no permissions; each job gets the minimum it needs for the upmost security
 permissions: {}
 
 jobs:
+  # -------------------- REQUIRED: SAST --------------------
   codeql-analysis:
     name: Perform CodeQL Analysis
     runs-on: ubuntu-latest
     permissions:
-      contents: read              # Required to read code
-      security-events: write      # Required to upload SARIF results
-      actions: read               # Optional: lets CodeQL check workflow context
+      contents: read            # read repo
+      security-events: write    # upload SARIF to Security tab
+      actions: read
     steps:
       - uses: actions/checkout@v4
       - uses: github/codeql-action/init@v3
@@ -24,30 +25,59 @@ jobs:
           languages: python
       - uses: github/codeql-action/analyze@v3
 
+  # -------------------- REQUIRED: SCA (image + IaC) --------------------
   trivy-scan:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
     permissions:
-      contents: read              # Only needs repo read access for Dockerfile
+      contents: read            # read Dockerfile / IaC
     steps:
       - uses: actions/checkout@v4
+
+      # Build image locally so Trivy can scan it
       - name: Build Docker image for Trivy scan
         run: docker build -t secure-ml-api:latest .
-      - name: Run Trivy
+
+      - name: Trivy (Image)
         uses: aquasecurity/trivy-action@0.12.0
         with:
           image-ref: secure-ml-api:latest
           format: table
-          exit-code: 0
+          exit-code: 0               # do not fail CI; allows me the option to use branch protection to gate if desired
           ignore-unfixed: true
           vuln-type: os,library
           severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
 
+      - name: Trivy (Terraform IaC)
+        uses: aquasecurity/trivy-action@0.12.0
+        with:
+          scan-type: fs
+          scan-ref: terraform-deployment
+          format: table
+          exit-code: 0
+          ignore-unfixed: true
+
+  # -------------------- REQUIRED: Dependency Review (PRs) --------------------
+  dependency-review:
+    name: Dependency Review (PR gate)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: true
+
+  # -------------------- INFORMATIONAL: DAST (ZAP) --------------------
   zap-baseline-scan:
     name: OWASP ZAP Baseline Scan (Reports Only)
     runs-on: ubuntu-latest
     permissions:
-      contents: read              # Only needs read access to repo files
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -59,8 +89,8 @@ jobs:
           echo "Waiting for API to start..."
           sleep 30
 
-      - name: Run OWASP ZAP Baseline Scan in same network
-        continue-on-error: true
+      - name: ZAP Baseline (same network, writeable reports)
+        continue-on-error: true     # never block merges for project purposes 
         run: |
           mkdir -p zap-reports
           chmod 777 zap-reports
@@ -75,11 +105,23 @@ jobs:
               -r zap-report.html \
               -a
 
-      - name: List generated ZAP reports
-        run: ls -lah zap-reports || true
-
       - name: Upload ZAP Reports
         uses: actions/upload-artifact@v4
         with:
           name: zap-scan-reports
           path: zap-reports/*
+
+  # -------------------- PLAN ONLY: Terraform (manual apply later) --------------------
+  terraform-plan:
+    name: Terraform Plan (Review Only)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [codeql-analysis, trivy-scan, dependency-review]  
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform Init
+        run: terraform -chdir=terraform-deployment init
+      - name: Terraform Plan
+        run: terraform -chdir=terraform-deployment plan
