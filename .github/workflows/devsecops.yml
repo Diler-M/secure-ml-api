@@ -5,50 +5,37 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-
-# Prevent overlapping runs on the same ref
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  AWS_REGION: us-east-1
-  DOCKER_IMAGE: dilerm13/secure-ml-api:latest
-
-permissions:
-  contents: read
-  security-events: write
-  pull-requests: read
+  workflow_dispatch:
 
 jobs:
-  codeql-analysis:
-    name: CodeQL Analysis (SAST)
+  codeql:
+    name: CodeQL (SAST)
     runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: python
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
 
-  trivy-scan:
-    name: Trivy Security Scan (TXT + HTML)
+  trivy:
+    name: Trivy Image Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      # Optional: login if your image is private
-      - name: Docker login (Docker Hub)
-        if: ${{ secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN }}
-        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-
-      - name: Pull image to ensure it exists locally
-        run: docker pull $DOCKER_IMAGE
-
-      - name: Prep Trivy cache dir
-        run: mkdir -p ~/.cache/trivy
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Cache Trivy DB
         uses: actions/cache@v3
@@ -56,120 +43,99 @@ jobs:
           path: ~/.cache/trivy
           key: ${{ runner.os }}-trivy-db
 
-      - name: Run Trivy scan (text)
+      - name: Docker login (optional)
+        run: |
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+            echo "Logged into Docker Hub."
+          else
+            echo "Docker Hub credentials not set, skipping login."
+          fi
+
+      - name: Pull Docker image
+        run: docker pull ${{ secrets.DOCKERHUB_USERNAME }}/secure-ml-api:latest
+
+      - name: Run Trivy scan
         run: |
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v $HOME/.cache/trivy:/root/.cache/ \
-            -v $(pwd):/workspace \
             aquasec/trivy:latest image \
-              --format table \
-              --output /workspace/trivy-results.txt \
-              --pkg-types os,library \
-              --severity HIGH,CRITICAL \
-              --timeout 10m \
-              $DOCKER_IMAGE
+            --timeout 10m \
+            --format table \
+            --vuln-type os,library \
+            --severity HIGH,CRITICAL \
+            ${{ secrets.DOCKERHUB_USERNAME }}/secure-ml-api:latest | tee trivy-results.txt
 
-      - name: Run Trivy scan (HTML)
-        run: |
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v $HOME/.cache/trivy:/root/.cache/ \
-            -v $(pwd):/workspace \
             aquasec/trivy:latest image \
-              --format template \
-              --template "@contrib/html.tpl" \
-              --output /workspace/trivy-results.html \
-              --pkg-types os,library \
-              --severity HIGH,CRITICAL \
-              --timeout 10m \
-              $DOCKER_IMAGE
+            --timeout 10m \
+            --format template \
+            --template "@contrib/html.tpl" \
+            --output trivy-results.html \
+            ${{ secrets.DOCKERHUB_USERNAME }}/secure-ml-api:latest
 
-      - name: Fix permissions for Trivy cache
-        run: sudo chown -R $USER:$USER ~/.cache/trivy
-
-      - name: Upload Trivy reports
+      - name: Upload Trivy scan results
         uses: actions/upload-artifact@v4
         with:
-          name: trivy-reports
+          name: trivy-results
           path: |
             trivy-results.txt
             trivy-results.html
 
-  zap-scan:
-    name: OWASP ZAP Baseline (DAST)
+  zap:
+    name: OWASP ZAP DAST
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Docker login (Docker Hub)
-        if: ${{ secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN }}
-        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
-
-      - name: Start API container (background)
+      - name: Pull & run API container
         run: |
-          docker run -d --name api -p 8000:8000 $DOCKER_IMAGE
-          # wait until /docs returns HTTP 200 (max 60s)
-          for i in {1..60}; do
-            if curl -fsS http://localhost:8000/docs >/dev/null; then
+          docker run -d --name api -p 8000:8000 ${{ secrets.DOCKERHUB_USERNAME }}/secure-ml-api:latest
+          for i in {1..10}; do
+            if curl -s http://localhost:8000 > /dev/null; then
               echo "API is up"
               break
             fi
-            sleep 1
+            echo "Waiting for API..."
+            sleep 3
           done
 
-      - name: Run OWASP ZAP Baseline
+      - name: Run OWASP ZAP Baseline Scan
         run: |
           mkdir -p zap-reports
-          chmod 777 zap-reports
           docker run --rm --network=host \
-            -v $(pwd)/zap-reports:/zap/wrk \
+            -v $(pwd)/zap-reports:/zap/wrk/:rw \
             ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py \
-              -t http://localhost:8000 \
-              -I \
-              -r zap-report.html \
-              -J zap-report.json \
-              -w zap-report.md || true
-
-      - name: Stop API container
-        if: always()
-        run: docker rm -f api || true
+            zap-baseline.py -t http://localhost:8000 -r zap-report.html || true
 
       - name: Upload ZAP reports
         uses: actions/upload-artifact@v4
         with:
-          name: zap-reports
-          path: zap-reports/*
+          name: zap-report
+          path: zap-reports/zap-report.html
 
-  terraform-plan:
-    name: Terraform Plan (Review Only — runs last)
+  terraform:
+    name: Terraform Plan (Review Only)
     runs-on: ubuntu-latest
-    needs:
-      - codeql-analysis
-      - trivy-scan
-      - zap-scan
+    needs: [codeql, trivy, zap] # Run last after scans
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      TF_VAR_docker_image: "${{ secrets.DOCKERHUB_USERNAME }}/secure-ml-api:latest"
       TF_VAR_allowed_cidr: ${{ secrets.ALLOWED_CIDR }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.7.5
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      # Set the working directory to wherever your *.tf files live
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+
       - name: Terraform Init
-        working-directory: ./terraform-deployment
         run: terraform init
 
       - name: Terraform Plan
-        working-directory: ./terraform-deployment
         run: terraform plan -out=tfplan
-
-      - name: Upload Terraform Plan
-        uses: actions/upload-artifact@v4
-        with:
-          name: terraform-plan
-          path: terraform-deployment/tfplan
