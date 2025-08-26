@@ -167,24 +167,20 @@ While this project already demonstrates a strong DevSecOps pipeline with CI/CD, 
 
 ### 🔐 Security Enhancements
 - **Centralised Secrets Management**: Move secrets from GitHub Actions into AWS Secrets Manager or HashiCorp Vault for stronger protection.  
-- **Shift-Left Security**: Add developer side security checks such as `pre-commit` hooks with tools like Bandit to catch issues before code is pushed.  
 - **Policy-as-Code**: Introduce Checkov or Terraform Sentinel to enforce compliance on Terraform configurations.
 
 ### 🛠️ Infrastructure Enhancements
 - **Kubernetes (EKS) Migration**: Replace ECS with Amazon EKS (Kubernetes).  
-  - Kubernetes would provide better scalability, rolling deployments, and Helm chart support.  
+  - Kubernetes would provide better scalability and rolling deployments.
   - Runtime security could be enhanced by integrating **Falco**, which detects abnormal system calls and intrusions.  
 - **Observability Stack**: Add Prometheus & Grafana for monitoring, and either ELK Stack or AWS CloudWatch for centralised logging.  
-- **Advanced Deployment Strategies**: Implement Blue/Green or Canary deployments using Argo Rollouts or Flagger to reduce risk during upgrades.
 
 ### 🔄 CI/CD Pipeline Enhancements
-- **Automated Testing**: Extend the pipeline with unit tests (via `pytest`) and integration tests to ensure functional correctness.  
-- **Performance Testing**: Introduce load testing with `k6` or `Locust` to benchmark API performance under stress.  
+- **Automated Testing**: Extend the pipeline with unit tests (via `pytest`) and integration tests to ensure functional correctness.
 - **Stricter Security Gates**: Adjust the pipeline so that builds fail automatically if CodeQL, Trivy, or ZAP detect high or critical vulnerabilities.
 
 ### 🤖 Application Enhancements
 - **Authentication & Authorisation**: Add JWT-based authentication to protect API endpoints.  
-- **Rate Limiting**: Introduce API Gateway or an ingress controller to throttle requests and prevent abuse.  
 - **Model Management**: Use MLflow or AWS SageMaker to version, track, and serve ML models instead of relying on static Hugging Face models.
 
 ---
