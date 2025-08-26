@@ -1,4 +1,4 @@
-# 🚀 Securing AI - DecSecOps Demonstration
+# 🚀 Securing AI - DecSecOps Demonstration V1
 
 This repository demonstrates a **secure CI/CD pipeline** for a FastAPI-based ML service (sentiment analysis with Hugging Face).  
 
@@ -158,3 +158,37 @@ Artifacts include:
 - **Falco** can be integrated at runtime for container security monitoring.  
 - All security tools run in CI/CD before deploy.  
 - Terraform apply is **never automatic** in this setup to prevent accidental changes.
+
+---
+
+## 🚀 Future Improvements
+
+While this project already demonstrates a strong DevSecOps pipeline with CI/CD, IaC, and security scanning, there are several ways it could be further improved to align with real world enterprise practices:
+
+### 🔐 Security Enhancements
+- **Centralised Secrets Management**: Move secrets from GitHub Actions into AWS Secrets Manager or HashiCorp Vault for stronger protection.  
+- **Shift-Left Security**: Add developer side security checks such as `pre-commit` hooks with tools like Bandit to catch issues before code is pushed.  
+- **Policy-as-Code**: Introduce Checkov or Terraform Sentinel to enforce compliance on Terraform configurations.
+
+### 🛠️ Infrastructure Enhancements
+- **Kubernetes (EKS) Migration**: Replace ECS with Amazon EKS (Kubernetes).  
+  - Kubernetes would provide better scalability, rolling deployments, and Helm chart support.  
+  - Runtime security could be enhanced by integrating **Falco**, which detects abnormal system calls and intrusions.  
+- **Observability Stack**: Add Prometheus & Grafana for monitoring, and either ELK Stack or AWS CloudWatch for centralised logging.  
+- **Advanced Deployment Strategies**: Implement Blue/Green or Canary deployments using Argo Rollouts or Flagger to reduce risk during upgrades.
+
+### 🔄 CI/CD Pipeline Enhancements
+- **Automated Testing**: Extend the pipeline with unit tests (via `pytest`) and integration tests to ensure functional correctness.  
+- **Performance Testing**: Introduce load testing with `k6` or `Locust` to benchmark API performance under stress.  
+- **Stricter Security Gates**: Adjust the pipeline so that builds fail automatically if CodeQL, Trivy, or ZAP detect high or critical vulnerabilities.
+
+### 🤖 Application Enhancements
+- **Authentication & Authorisation**: Add JWT-based authentication to protect API endpoints.  
+- **Rate Limiting**: Introduce API Gateway or an ingress controller to throttle requests and prevent abuse.  
+- **Model Management**: Use MLflow or AWS SageMaker to version, track, and serve ML models instead of relying on static Hugging Face models.
+
+---
+
+## What's next?
+
+- This project isn’t done yet! I’ll be back in part 2 to roll out some of the improvements I’ve talked about!
