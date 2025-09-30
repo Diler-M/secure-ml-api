@@ -1,0 +1,51 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: secure-ml-api
+  namespace: secure-ml
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: secure-ml-api
+  template:
+    metadata:
+      labels:
+        app: secure-ml-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+      - name: api
+        image: <your-dockerhub-username>/secure-ml-api:latest
+        ports: [{ containerPort: 8000 }]
+        env:
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: jwt-secret
+              key: JWT_SECRET
+        resources:
+          requests: { cpu: "200m", memory: "256Mi" }
+          limits:   { cpu: "500m", memory: "512Mi" }
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: { drop: ["ALL"] }
+        readinessProbe:
+          httpGet: { path: /healthz, port: 8000 }
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        livenessProbe:
+          httpGet: { path: /healthz, port: 8000 }
+          initialDelaySeconds: 10
+          periodSeconds: 10
+  strategy:
+    canary:
+      steps:
+      - setWeight: 20
+      - pause: { duration: 180 }
+      - setWeight: 50
+      - pause: { duration: 300 }
+      - setWeight: 100

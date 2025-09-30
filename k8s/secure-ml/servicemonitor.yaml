@@ -1,0 +1,14 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: secure-ml-sm
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels: { app: secure-ml-api }
+  namespaceSelector:
+    matchNames: ["secure-ml"]
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s

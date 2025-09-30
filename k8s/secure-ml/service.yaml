@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: secure-ml-svc
+  namespace: secure-ml
+  labels: { app: secure-ml-api }
+spec:
+  type: ClusterIP
+  selector: { app: secure-ml-api }
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000

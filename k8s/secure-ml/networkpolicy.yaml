@@ -1,0 +1,16 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-nginx
+  namespace: secure-ml
+spec:
+  podSelector:
+    matchLabels: { app: secure-ml-api }
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: nginx-ingress
+    ports:
+    - protocol: TCP
+      port: 80

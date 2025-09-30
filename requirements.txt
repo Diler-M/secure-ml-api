@@ -1,5 +1,6 @@
 fastapi
-uvicorn
+uvicorn[standard]
 transformers
-pydantic
-torch --extra-index-url https://download.pytorch.org/whl/cpu
+PyJWT==2.9.0
+slowapi==0.1.9
+prometheus-fastapi-instrumentator==6.1.0

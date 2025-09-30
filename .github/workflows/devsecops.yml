@@ -1,4 +1,4 @@
-name: DevSecOps Pipeline
+name: DevSecOps Pipeline (EKS)
 
 on:
   push:
@@ -7,13 +7,11 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
-# Default to no permissions; each job gets the minimum it needs
 permissions: {}
 
 jobs:
-  # -------------------- SAST --------------------
-  codeql-analysis:
-    name: Perform CodeQL Analysis
+  codeql:
+    name: CodeQL (SAST)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -26,126 +24,78 @@ jobs:
           languages: python
       - uses: github/codeql-action/analyze@v3
 
-  # -------------------- SCA (Image + IaC) --------------------
-  trivy-scan:
-    name: Trivy Security Scan
+  trivy:
+    name: Trivy (Image + EKS IaC)
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
-
-      - name: Build Docker image for Trivy scan
+      - name: Build image for scan
         run: docker build -t secure-ml-api:latest .
-
-      - name: Trivy (Image)
+      - name: Trivy (Image) - fail on HIGH/CRITICAL
         uses: aquasecurity/trivy-action@0.12.0
         with:
           image-ref: secure-ml-api:latest
           format: table
-          exit-code: 0
+          exit-code: 1
           ignore-unfixed: true
           vuln-type: os,library
-          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
-
-      - name: Trivy (Terraform IaC)
+          severity: HIGH,CRITICAL
+      - name: Trivy (Terraform IaC for EKS) - fail on HIGH/CRITICAL
         uses: aquasecurity/trivy-action@0.12.0
         with:
           scan-type: fs
-          scan-ref: terraform-deployment
+          scan-ref: terraform-eks
           format: table
-          exit-code: 0
+          exit-code: 1
           ignore-unfixed: true
 
-  # -------------------- Dependency Review (PRs only) --------------------
-  dependency-review:
-    name: Dependency Review (PR gate)
+  checkov:
+    name: Checkov (EKS Terraform policy)
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
     permissions:
       contents: read
-      pull-requests: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/dependency-review-action@v4
+      - uses: bridgecrewio/checkov-action@v12
         with:
-          fail-on-severity: high
-          comment-summary-in-pr: true
+          directory: terraform-eks
+          soft_fail: false
 
-  # -------------------- DAST --------------------
-  zap-baseline-scan:
-    name: OWASP ZAP Baseline Scan (Reports Only)
+  sbom:
+    name: SBOM (Syft)
     runs-on: ubuntu-latest
-    # IMPORTANT: depend only on jobs that always run on both push and PR
-    needs: [codeql-analysis, trivy-scan]
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
-
-      - name: Create Docker network & start API
+      - name: Build image for SBOM
+        run: docker build -t secure-ml-api:latest .
+      - name: Generate SBOM (SPDX JSON)
         run: |
-          docker network create zapnet || true
-          docker build -t secure-ml-api .
-          docker run -d --network zapnet --name api secure-ml-api
-          echo "Waiting for API to start..."
-          for i in {1..30}; do
-            if curl -fsS http://localhost:8000/docs >/dev/null; then
-              echo "API is up"
-              break
-            fi
-            sleep 2
-          done
-
-      - name: ZAP Baseline (same network, writeable reports)
-        continue-on-error: true
-        run: |
-          mkdir -p zap-reports
-          chmod 777 zap-reports
           docker run --rm \
-            --network zapnet \
-            -v "$PWD/zap-reports:/zap/wrk:rw" \
-            ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py \
-              -t http://api:8000 \
-              -J zap-report.json \
-              -w zap-report.md \
-              -r zap-report.html \
-              -a
-
-      - name: Upload ZAP Reports
-        if: always()
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            anchore/syft:latest packages docker:secure-ml-api:latest -o spdx-json > sbom.spdx.json
+      - name: Upload SBOM
         uses: actions/upload-artifact@v4
         with:
-          name: zap-scan-reports
-          path: zap-reports/*
+          name: sbom
+          path: sbom.spdx.json
 
-      - name: Cleanup API container
-        if: always()
-        run: docker rm -f api || true
-
-  # -------------------- Terraform Plan (runs last) --------------------
   terraform-plan:
-    name: Terraform Plan (Review Only)
+    name: Terraform Plan (EKS) — review only
     runs-on: ubuntu-latest
-    needs: [zap-baseline-scan]
+    needs: [trivy, checkov, sbom]
     permissions:
       contents: read
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
     steps:
       - uses: actions/checkout@v4
-
-      # ✅ configure AWS creds from repo secrets
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1 
-
       - uses: hashicorp/setup-terraform@v3
-
-      - name: Terraform Init
-        run: terraform -chdir=terraform-deployment init
-
-      - name: Terraform Plan
-        run: terraform -chdir=terraform-deployment plan
+      - name: Terraform Init (EKS)
+        run: terraform -chdir=terraform-eks init
+      - name: Terraform Plan (EKS)
+        run: terraform -chdir=terraform-eks plan
