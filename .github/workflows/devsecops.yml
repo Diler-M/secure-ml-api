@@ -2,7 +2,7 @@ name: DevSecOps Pipeline (EKS)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "part-2" ]
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
@@ -18,11 +18,16 @@ jobs:
       security-events: write
       actions: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
         with:
           languages: python
-      - uses: github/codeql-action/analyze@v3
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
 
   trivy:
     name: Trivy (Image + EKS IaC)
@@ -30,9 +35,12 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Build image for scan
         run: docker build -t secure-ml-api:latest .
+
       - name: Trivy (Image) - fail on HIGH/CRITICAL
         uses: aquasecurity/trivy-action@0.12.0
         with:
@@ -42,6 +50,7 @@ jobs:
           ignore-unfixed: true
           vuln-type: os,library
           severity: HIGH,CRITICAL
+
       - name: Trivy (Terraform IaC for EKS) - fail on HIGH/CRITICAL
         uses: aquasecurity/trivy-action@0.12.0
         with:
@@ -57,8 +66,11 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: bridgecrewio/checkov-action@v12
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkov scan
+        uses: bridgecrewio/checkov-action@v12
         with:
           directory: terraform-eks
           soft_fail: false
@@ -69,14 +81,18 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Build image for SBOM
         run: docker build -t secure-ml-api:latest .
+
       - name: Generate SBOM (SPDX JSON)
         run: |
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             anchore/syft:latest packages docker:secure-ml-api:latest -o spdx-json > sbom.spdx.json
+
       - name: Upload SBOM
         uses: actions/upload-artifact@v4
         with:
@@ -93,9 +109,14 @@ jobs:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
       - name: Terraform Init (EKS)
         run: terraform -chdir=terraform-eks init
+
       - name: Terraform Plan (EKS)
         run: terraform -chdir=terraform-eks plan
