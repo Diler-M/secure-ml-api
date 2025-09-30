@@ -3,15 +3,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-    kubernetes = {
-      source  = "hashicorp/kubernetes"
-      version = "~> 2.29"
-    }
-    helm = {
-      source  = "hashicorp/helm"
-      version = "~> 2.13"
+      version = ">= 5.0"
     }
   }
 }
@@ -20,25 +12,5 @@ provider "aws" {
   region = var.aws_region
 }
 
-# These data sources resolve AFTER the cluster resource exists (in main.tf).
-data "aws_eks_cluster" "this" {
-  name = aws_eks_cluster.this.name
-}
-
-data "aws_eks_cluster_auth" "this" {
-  name = aws_eks_cluster.this.name
-}
-
-provider "kubernetes" {
-  host                   = data.aws_eks_cluster.this.endpoint
-  cluster_ca_certificate = base64decode(data.aws_eks_cluster.this.certificate_authority[0].data)
-  token                  = data.aws_eks_cluster_auth.this.token
-}
-
-provider "helm" {
-  kubernetes {
-    host                   = data.aws_eks_cluster.this.endpoint
-    cluster_ca_certificate = base64decode(data.aws_eks_cluster.this.certificate_authority[0].data)
-    token                  = data.aws_eks_cluster_auth.this.token
-  }
-}
+# Who am I? (used in KMS key policies)
+data "aws_caller_identity" "current" {}

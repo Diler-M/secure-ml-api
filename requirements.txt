@@ -1,6 +1,7 @@
-fastapi
-uvicorn[standard]
-transformers
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+transformers==4.44.2
 PyJWT==2.9.0
 slowapi==0.1.9
 prometheus-fastapi-instrumentator==6.1.0
+setuptools>=78.1.1
