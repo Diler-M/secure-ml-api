@@ -106,14 +106,16 @@ resource "aws_kms_key" "cloudwatch_logs" {
   description             = "KMS key for CloudWatch log encryption"
   deletion_window_in_days = 7
   enable_key_rotation     = true
+  policy                  = data.aws_iam_policy_document.kms_cloudwatch_logs.json
   tags                    = merge(var.tags, { Name = "cw-logs-kms" })
 }
 
-resource "aws_cloudwatch_log_group" "vpc_flow" {
-  name              = "/aws/vpc/flow"
-  kms_key_id        = aws_kms_key.cloudwatch_logs.arn
-  retention_in_days = 400
-  tags              = merge(var.tags, { Name = "vpc-flow-logs" })
+resource "aws_kms_key" "eks_secrets" {
+  description             = "KMS key for EKS secrets encryption"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+  policy                  = data.aws_iam_policy_document.kms_eks_secrets.json
+  tags                    = merge(var.tags, { Name = "eks-secrets-kms" })
 }
 
 # Role for flow logs to write to CWL
@@ -168,6 +170,91 @@ resource "aws_kms_key" "eks_secrets" {
   deletion_window_in_days = 7
   enable_key_rotation     = true
   tags                    = merge(var.tags, { Name = "eks-secrets-kms" })
+}
+
+# ---- KMS key policy for CloudWatch Logs key ----
+data "aws_iam_policy_document" "kms_cloudwatch_logs" {
+  statement {
+    sid     = "AllowRootFullAccess"
+    effect  = "Allow"
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+    actions   = ["kms:*"]
+    resources = ["*"]
+  }
+
+  # Let the CloudWatch Logs service use the key for the specific log group
+  statement {
+    sid    = "AllowCloudWatchLogsUseOfKey"
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["logs.${data.aws_region.current.name}.amazonaws.com"]
+    }
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:DescribeKey"
+    ]
+    resources = ["*"]
+
+    # Scope to the target log group
+    condition {
+      test     = "ArnEquals"
+      variable = "kms:EncryptionContext:aws:logs:arn"
+      values   = [aws_cloudwatch_log_group.vpc_flow.arn]
+    }
+  }
+}
+
+# ---- KMS key policy for EKS secrets key ----
+data "aws_iam_policy_document" "kms_eks_secrets" {
+  statement {
+    sid     = "AllowRootFullAccess"
+    effect  = "Allow"
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+    actions   = ["kms:*"]
+    resources = ["*"]
+  }
+
+  # Allow EKS service to use the key (scoped via ViaService and account)
+  statement {
+    sid    = "AllowEKSUseOfKey"
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["eks.${data.aws_region.current.name}.amazonaws.com"]
+    }
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:DescribeKey",
+      "kms:CreateGrant",
+      "kms:ListGrants",
+      "kms:RevokeGrant"
+    ]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:CallerAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["eks.${data.aws_region.current.name}.amazonaws.com"]
+    }
+  }
 }
 
 # EKS control-plane role
@@ -272,4 +359,12 @@ resource "aws_eks_node_group" "default" {
     aws_iam_role_policy_attachment.node_ecr_ro,
     aws_iam_role_policy_attachment.node_cni
   ]
+}
+
+# Lock down the default security group (no ingress/egress)
+resource "aws_default_security_group" "this" {
+  vpc_id                 = aws_vpc.eks.id
+  revoke_rules_on_delete = true
+  # No ingress/egress blocks => provider removes the defaults
+  tags = merge(var.tags, { Name = "default-sg-locked" })
 }

@@ -13,5 +13,6 @@ provider "aws" {
   region = var.region
 }
 
-# Useful for ARNs/account scoping in policies (if you need it elsewhere)
+# Identities/metadata used in policies
 data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
