@@ -1,67 +1,87 @@
-############################
-# Networking (VPC + Subnets)
-############################
+terraform {
+  required_version = ">= 1.5.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = ">= 5.0"
+    }
+  }
+}
 
+locals {
+  cluster_name = var.cluster_name
+  tags = merge(var.tags, { Project = "secure-ml-api" })
+}
+
+# ---------------- VPC & Subnets ----------------
 resource "aws_vpc" "eks" {
   cidr_block           = "10.1.0.0/16"
   enable_dns_hostnames = true
   enable_dns_support   = true
-  tags = merge(var.tags, {
-    Name = "eks-vpc"
-  })
+  tags = merge(var.tags, { Name = "eks-vpc" })
 }
 
-# Internet Gateway for public egress
+# RESTRICT DEFAULT SECURITY GROUP (Checkov CKV2_AWS_12)
+resource "aws_default_security_group" "default" {
+  vpc_id                 = aws_vpc.eks.id
+  # Explicitly remove all rules
+  ingress = []
+  egress  = []
+  tags    = merge(var.tags, { Name = "default-sg-restricted" })
+}
+
 resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.eks.id
   tags   = merge(var.tags, { Name = "eks-igw" })
 }
 
-# Public subnets (do NOT auto-assign public IPs to satisfy CKV_AWS_130)
+# Public subnets (no auto public IP on nodes; used for ALB)
 resource "aws_subnet" "public_a" {
-  vpc_id                  = aws_vpc.eks.id
-  cidr_block              = "10.1.1.0/24"
-  availability_zone       = "${var.aws_region}${var.az_a_suffix}"
+  vpc_id            = aws_vpc.eks.id
+  cidr_block        = "10.1.1.0/24"
+  availability_zone = "${var.aws_region}${var.az_a_suffix}"
   map_public_ip_on_launch = false
-  tags = merge(var.tags, {
-    Name                        = "eks-public-a"
-    "kubernetes.io/role/elb"    = "1"
-  })
+  tags = {
+    Name                     = "eks-public-a"
+    "kubernetes.io/role/elb" = "1"
+  }
 }
 
 resource "aws_subnet" "public_b" {
-  vpc_id                  = aws_vpc.eks.id
-  cidr_block              = "10.1.2.0/24"
-  availability_zone       = "${var.aws_region}${var.az_b_suffix}"
+  vpc_id            = aws_vpc.eks.id
+  cidr_block        = "10.1.2.0/24"
+  availability_zone = "${var.aws_region}${var.az_b_suffix}"
   map_public_ip_on_launch = false
-  tags = merge(var.tags, {
-    Name                        = "eks-public-b"
-    "kubernetes.io/role/elb"    = "1"
-  })
+  tags = {
+    Name                     = "eks-public-b"
+    "kubernetes.io/role/elb" = "1"
+  }
 }
 
-# Private subnets (for nodes / cluster)
+# Private subnets (nodes live here)
 resource "aws_subnet" "private_a" {
   vpc_id            = aws_vpc.eks.id
-  cidr_block        = "10.1.101.0/24"
+  cidr_block        = "10.1.3.0/24"
   availability_zone = "${var.aws_region}${var.az_a_suffix}"
-  tags = merge(var.tags, {
-    Name                             = "eks-private-a"
+  map_public_ip_on_launch = false
+  tags = {
+    Name                              = "eks-private-a"
     "kubernetes.io/role/internal-elb" = "1"
-  })
+  }
 }
 
 resource "aws_subnet" "private_b" {
   vpc_id            = aws_vpc.eks.id
-  cidr_block        = "10.1.102.0/24"
+  cidr_block        = "10.1.4.0/24"
   availability_zone = "${var.aws_region}${var.az_b_suffix}"
-  tags = merge(var.tags, {
-    Name                             = "eks-private-b"
+  map_public_ip_on_launch = false
+  tags = {
+    Name                              = "eks-private-b"
     "kubernetes.io/role/internal-elb" = "1"
-  })
+  }
 }
 
-# EIP + NAT Gateway for private subnets egress
+# NAT for private egress
 resource "aws_eip" "nat_eip" {
   domain = "vpc"
   tags   = merge(var.tags, { Name = "eks-nat-eip" })
@@ -71,17 +91,17 @@ resource "aws_nat_gateway" "nat" {
   allocation_id = aws_eip.nat_eip.id
   subnet_id     = aws_subnet.public_a.id
   tags          = merge(var.tags, { Name = "eks-nat" })
+  depends_on    = [aws_internet_gateway.igw]
 }
 
 # Route tables
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.eks.id
-  tags   = merge(var.tags, { Name = "eks-public-rt" })
-
   route {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.igw.id
   }
+  tags = merge(var.tags, { Name = "eks-public-rt" })
 }
 
 resource "aws_route_table_association" "public_a" {
@@ -96,12 +116,11 @@ resource "aws_route_table_association" "public_b" {
 
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.eks.id
-  tags   = merge(var.tags, { Name = "eks-private-rt" })
-
   route {
     cidr_block     = "0.0.0.0/0"
     nat_gateway_id = aws_nat_gateway.nat.id
   }
+  tags = merge(var.tags, { Name = "eks-private-rt" })
 }
 
 resource "aws_route_table_association" "private_a" {
@@ -114,148 +133,100 @@ resource "aws_route_table_association" "private_b" {
   route_table_id = aws_route_table.private.id
 }
 
-############################
-# VPC Flow Logs (encrypted)
-############################
-
-# KMS for CloudWatch Logs
+# ---------------- VPC Flow Logs (with KMS) ----------------
 resource "aws_kms_key" "cloudwatch_logs" {
-  description             = "KMS key for VPC Flow Logs (CloudWatch)"
+  description             = "KMS key for CloudWatch log encryption"
   deletion_window_in_days = 7
   enable_key_rotation     = true
-
-  policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [
-      {
-        Sid      = "EnableIAMUserPermissions",
-        Effect   = "Allow",
-        Principal = { AWS = data.aws_caller_identity.current.account_id },
-        Action   = "kms:*",
-        Resource = "*"
-      },
-      {
-        Sid      = "AllowCloudWatchLogsUse",
-        Effect   = "Allow",
-        Principal = { Service = "logs.${var.aws_region}.amazonaws.com" },
-        Action   = [
-          "kms:Encrypt",
-          "kms:Decrypt",
-          "kms:ReEncrypt*",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey"
-        ],
-        Resource = "*"
-      }
-    ]
-  })
-  tags = merge(var.tags, { Name = "kms-cloudwatch-logs" })
+  tags                    = merge(var.tags, { Name = "cw-logs-kms" })
 }
 
 resource "aws_cloudwatch_log_group" "vpc_flow" {
   name              = "/aws/vpc/flow/${aws_vpc.eks.id}"
-  retention_in_days = 400                         # >= 365 (CKV_AWS_338)
-  kms_key_id        = aws_kms_key.cloudwatch_logs.arn  # Encrypt (CKV_AWS_158)
+  retention_in_days = 400
+  kms_key_id        = aws_kms_key.cloudwatch_logs.arn
   tags              = merge(var.tags, { Name = "vpc-flow-logs" })
 }
 
 resource "aws_iam_role" "vpc_flow" {
-  name = "vpc-flow-logs-role"
+  name = "${local.cluster_name}-vpc-flow-role"
   assume_role_policy = jsonencode({
     Version = "2012-10-17",
     Statement = [{
       Effect = "Allow",
       Principal = { Service = "vpc-flow-logs.amazonaws.com" },
-      Action = "sts:AssumeRole"
+      Action   = "sts:AssumeRole"
     }]
   })
-  tags = var.tags
+  tags = local.tags
 }
 
-# Scope permissions to the specific Log Group (avoid Resource="*")
 resource "aws_iam_role_policy" "vpc_flow" {
   name = "vpc-flow-logs-policy"
   role = aws_iam_role.vpc_flow.id
   policy = jsonencode({
     Version = "2012-10-17",
-    Statement = [{
-      Effect = "Allow",
-      Action = [
-        "logs:CreateLogStream",
-        "logs:PutLogEvents",
-        "logs:DescribeLogGroups",
-        "logs:DescribeLogStreams"
-      ],
-      Resource = [
-        aws_cloudwatch_log_group.vpc_flow.arn,
-        "${aws_cloudwatch_log_group.vpc_flow.arn}:*"
-      ]
-    }]
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogGroups",
+          "logs:DescribeLogStreams"
+        ],
+        Resource = aws_cloudwatch_log_group.vpc_flow.arn
+      }
+    ]
   })
 }
 
-resource "aws_flow_log" "this" {
+resource "aws_flow_log" "vpc" {
   log_destination_type = "cloud-watch-logs"
   log_group_name       = aws_cloudwatch_log_group.vpc_flow.name
   iam_role_arn         = aws_iam_role.vpc_flow.arn
   traffic_type         = "ALL"
   vpc_id               = aws_vpc.eks.id
-  tags                 = merge(var.tags, { Name = "eks-vpc-flow-logs" })
+  tags                 = merge(var.tags, { Name = "vpc-flow-log" })
 }
 
-############################
-# KMS for EKS Secrets
-############################
-
+# ---------------- EKS: Secrets KMS ----------------
 resource "aws_kms_key" "eks_secrets" {
   description             = "KMS key for EKS Secrets Encryption"
   deletion_window_in_days = 7
   enable_key_rotation     = true
-
-  # Explicit key policy (CKV2_AWS_64)
   policy = jsonencode({
     Version = "2012-10-17",
-    Statement = [
-      {
-        Sid      = "AllowRootAccountAdmin",
-        Effect   = "Allow",
-        Principal = { AWS = data.aws_caller_identity.current.account_id },
-        Action   = "kms:*",
-        Resource = "*"
-      },
-      {
-        Sid      = "AllowEKSToUseKey",
-        Effect   = "Allow",
-        Principal = { Service = "eks.amazonaws.com" },
-        Action   = [
-          "kms:Encrypt",
-          "kms:Decrypt",
-          "kms:ReEncrypt*",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey"
-        ],
-        Resource = "*"
+    Statement = [{
+      Effect = "Allow",
+      Principal = { AWS = "*" },
+      Action   = [
+        "kms:Encrypt", "kms:Decrypt", "kms:DescribeKey", "kms:GenerateDataKey*",
+        "kms:List*", "kms:ReEncrypt*"
+      ],
+      Resource = "*",
+      Condition = {
+        StringEquals = {
+          "kms:ViaService" = "eks.${var.aws_region}.amazonaws.com"
+        }
       }
-    ]
+    }]
   })
-  tags = merge(var.tags, { Name = "kms-eks-secrets" })
+  tags = merge(var.tags, { Name = "eks-secrets-kms" })
 }
 
-############################
-# EKS IAM Roles
-############################
-
+# ---------------- EKS Cluster & Node Group ----------------
 resource "aws_iam_role" "eks_cluster" {
-  name = "${var.cluster_name}-cluster-role"
+  name = "${local.cluster_name}-cluster-role"
   assume_role_policy = jsonencode({
     Version = "2012-10-17",
     Statement = [{
       Effect = "Allow",
       Principal = { Service = "eks.amazonaws.com" },
-      Action = "sts:AssumeRole"
+      Action   = "sts:AssumeRole"
     }]
   })
-  tags = var.tags
+  tags = local.tags
 }
 
 resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
@@ -263,17 +234,41 @@ resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
 }
 
+resource "aws_eks_cluster" "this" {
+  name     = local.cluster_name
+  role_arn = aws_iam_role.eks_cluster.arn
+  version  = var.kubernetes_version
+
+  vpc_config {
+    endpoint_public_access  = false
+    endpoint_private_access = true
+    subnet_ids              = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+  }
+
+  encryption_config {
+    provider {
+      key_arn = aws_kms_key.eks_secrets.arn
+    }
+    resources = ["secrets"]
+  }
+
+  enabled_cluster_log_types = ["api", "audit", "authenticator", "scheduler", "controllerManager"]
+
+  depends_on = [aws_iam_role_policy_attachment.eks_cluster_policy]
+  tags       = local.tags
+}
+
 resource "aws_iam_role" "eks_node" {
-  name = "${var.cluster_name}-node-role"
+  name = "${local.cluster_name}-node-role"
   assume_role_policy = jsonencode({
     Version = "2012-10-17",
     Statement = [{
       Effect = "Allow",
       Principal = { Service = "ec2.amazonaws.com" },
-      Action = "sts:AssumeRole"
+      Action   = "sts:AssumeRole"
     }]
   })
-  tags = var.tags
+  tags = local.tags
 }
 
 resource "aws_iam_role_policy_attachment" "node_worker" {
@@ -291,69 +286,30 @@ resource "aws_iam_role_policy_attachment" "node_cni" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
 }
 
-############################
-# EKS Cluster (private endpoint, logging, secrets enc)
-############################
-
-resource "aws_eks_cluster" "this" {
-  name     = var.cluster_name
-  role_arn = aws_iam_role.eks_cluster.arn
-
-  vpc_config {
-    subnet_ids              = [aws_subnet.private_a.id, aws_subnet.private_b.id]
-    endpoint_private_access = true
-    endpoint_public_access  = false
-  }
-
-  kubernetes_network_config {
-    ip_family = "ipv4"
-  }
-
-  # Control plane logging enabled (CKV_AWS_37)
-  enabled_cluster_log_types = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
-
-  # Secrets encryption (CKV_AWS_58)
-  encryption_config {
-    resources = ["secrets"]
-    provider {
-      key_arn = aws_kms_key.eks_secrets.arn
-    }
-  }
-
-  depends_on = [
-    aws_iam_role_policy_attachment.eks_cluster_policy
-  ]
-
-  tags = var.tags
-}
-
-############################
-# EKS Node Group (private subnets)
-############################
-
 resource "aws_eks_node_group" "default" {
   cluster_name    = aws_eks_cluster.this.name
+  node_group_name = "${local.cluster_name}-ng"
   node_role_arn   = aws_iam_role.eks_node.arn
-  node_group_name = "${var.cluster_name}-ng"
   subnet_ids      = [aws_subnet.private_a.id, aws_subnet.private_b.id]
-  capacity_type   = "ON_DEMAND"
-  instance_types  = var.node_instance_types
 
   scaling_config {
-    desired_size = var.node_desired_size
-    min_size     = var.node_min_size
-    max_size     = var.node_max_size
+    desired_size = 2
+    min_size     = 2
+    max_size     = 4
   }
 
-  update_config {
-    max_unavailable = 1
-  }
+  instance_types = ["t3.medium"]
+  ami_type       = "AL2_x86_64"
 
-  tags = var.tags
+  tags = local.tags
 
   depends_on = [
     aws_iam_role_policy_attachment.node_worker,
     aws_iam_role_policy_attachment.node_ecr_ro,
     aws_iam_role_policy_attachment.node_cni
   ]
+}
+
+output "cluster_name" {
+  value = aws_eks_cluster.this.name
 }
