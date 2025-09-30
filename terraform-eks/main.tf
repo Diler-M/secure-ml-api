@@ -313,3 +313,49 @@ resource "aws_eks_node_group" "default" {
 output "cluster_name" {
   value = aws_eks_cluster.this.name
 }
+
+# Discover current account and region for the KMS policy principals/conditions
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
+# Explicit policy for the CloudWatch Logs KMS key (required by CKV2_AWS_64)
+resource "aws_kms_key_policy" "cloudwatch_logs" {
+  key_id = aws_kms_key.cloudwatch_logs.key_id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Id      = "cw-logs-kms-policy"
+    Statement = [
+      {
+        Sid       = "EnableRootPermissions"
+        Effect    = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid       = "AllowCloudWatchLogsUseOfTheKey"
+        Effect    = "Allow"
+        Principal = {
+          Service = "logs.${data.aws_region.current.name}.amazonaws.com"
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource  = "*"
+        Condition = {
+          ArnEquals = {
+            # Limit usage to your specific log group
+            "kms:EncryptionContext:aws:logs:arn" = aws_cloudwatch_log_group.vpc_flow.arn
+          }
+        }
+      }
+    ]
+  })
+}
