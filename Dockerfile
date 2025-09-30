@@ -25,8 +25,7 @@ COPY --from=builder /wheels /wheels
 COPY . /app
 
 # Install from wheels for repeatable builds
-RUN pip install --no-cache-dir --find-links=/wheels -r requirements.txt && \
-    rm -rf /wheels
+RUN pip install --no-cache-dir --upgrade pip setuptools==78.1.1 wheel
 
 # Security hardening
 USER appuser
