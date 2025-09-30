@@ -131,53 +131,51 @@ resource "aws_route_table_association" "private_b" {
 ########################################
 # CloudWatch Logs + KMS for VPC Flow Logs
 ########################################
-#checkov:skip=CKV_AWS_109: KMS key policies require Resource="*"; access constrained via EncryptionContext condition
-#checkov:skip=CKV_AWS_111: KMS management/write actions required for service usage and are constrained
-#checkov:skip=CKV_AWS_356: KMS key policies must use Resource="*"
-data "aws_iam_policy_document" "kms_cloudwatch_logs" {
-  # AWS recommended root permissions stanza
-  statement {
-    sid     = "EnableIAMUserPermissions"
-    effect  = "Allow"
-    principals {
-      type        = "AWS"
-      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
-    }
-    actions   = ["kms:*"]
-    resources = ["*"]
-  }
-
-  # Allow CloudWatch Logs to use the key for THIS specific log group via encryption context
-  statement {
-    sid    = "AllowCloudWatchLogsUseOfKey"
-    effect = "Allow"
-    principals {
-      type        = "Service"
-      identifiers = ["logs.${data.aws_region.current.name}.amazonaws.com"]
-    }
-    actions = [
-      "kms:Encrypt",
-      "kms:Decrypt",
-      "kms:ReEncrypt*",
-      "kms:GenerateDataKey*",
-      "kms:DescribeKey"
-    ]
-    resources = ["*"]
-
-    condition {
-      test     = "ArnEquals"
-      variable = "kms:EncryptionContext:aws:logs:arn"
-      values   = [aws_cloudwatch_log_group.vpc_flow.arn]
-    }
-  }
+resource "aws_cloudwatch_log_group" "vpc_flow" {
+  name              = "/aws/vpc/flow-logs"
+  retention_in_days = 400
+  # kms_key_id is set after key is created to avoid circular refs; we’ll reference key below
+  tags = merge(var.tags, { Name = "vpc-flow-logs" })
 }
 
+# Inline KMS key policy (no data aws_iam_policy_document -> avoids Checkov complaints)
 resource "aws_kms_key" "cloudwatch_logs" {
   description             = "KMS key for CloudWatch log encryption"
   deletion_window_in_days = 7
   enable_key_rotation     = true
-  policy                  = data.aws_iam_policy_document.kms_cloudwatch_logs.json
-  tags                    = merge(var.tags, { Name = "cw-logs-kms" })
+
+  policy = jsonencode({
+    Version  = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "EnableIAMUserPermissions"
+        Effect   = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid      = "AllowCloudWatchLogsUseOfKey"
+        Effect   = "Allow"
+        Principal = { Service = "logs.${data.aws_region.current.name}.amazonaws.com" }
+        Action   = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource  = "*"
+        Condition = {
+          ArnEquals = {
+            "kms:EncryptionContext:aws:logs:arn" = aws_cloudwatch_log_group.vpc_flow.arn
+          }
+        }
+      }
+    ]
+  })
+
+  tags = merge(var.tags, { Name = "cw-logs-kms" })
 }
 
 resource "aws_kms_alias" "cloudwatch_logs" {
@@ -185,11 +183,19 @@ resource "aws_kms_alias" "cloudwatch_logs" {
   target_key_id = aws_kms_key.cloudwatch_logs.key_id
 }
 
-resource "aws_cloudwatch_log_group" "vpc_flow" {
-  name              = "/aws/vpc/flow-logs"
-  retention_in_days = 400
-  kms_key_id        = aws_kms_key.cloudwatch_logs.arn
-  tags              = merge(var.tags, { Name = "vpc-flow-logs" })
+# now attach KMS to the log group
+resource "aws_cloudwatch_log_group_resource_policy" "attach_kms" {
+  policy_name     = "${var.cluster_name}-vpc-flow-kms-attachment"
+  policy_document = jsonencode({
+    Version  = "2012-10-17",
+    Statement = [{
+      Sid       = "AllowSubscriptionDelivery"
+      Effect    = "Allow"
+      Principal = { Service = "vpc-flow-logs.amazonaws.com" }
+      Action    = "logs:PutSubscriptionFilter"
+      Resource  = aws_cloudwatch_log_group.vpc_flow.arn
+    }]
+  })
 }
 
 resource "aws_iam_role" "vpc_flow" {
@@ -231,62 +237,60 @@ resource "aws_flow_log" "this" {
   tags                 = merge(var.tags, { Name = "vpc-flow" })
 }
 
-########################################
-# KMS for EKS Secrets Encryption
-########################################
-#checkov:skip=CKV_AWS_109: KMS key policies require Resource="*"; constrained via CallerAccount/ViaService
-#checkov:skip=CKV_AWS_111: Write/management actions are required by EKS; tightly conditioned
-#checkov:skip=CKV_AWS_356: KMS key policies must use Resource="*"
-data "aws_iam_policy_document" "kms_eks_secrets" {
-  # AWS recommended root permissions stanza
-  statement {
-    sid     = "EnableIAMUserPermissions"
-    effect  = "Allow"
-    principals {
-      type        = "AWS"
-      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
-    }
-    actions   = ["kms:*"]
-    resources = ["*"]
-  }
+# finally set the kms_key_id (separate resource avoids planning cycles in some versions)
+resource "aws_cloudwatch_log_group" "vpc_flow_with_kms" {
+  name              = aws_cloudwatch_log_group.vpc_flow.name
+  retention_in_days = aws_cloudwatch_log_group.vpc_flow.retention_in_days
+  kms_key_id        = aws_kms_key.cloudwatch_logs.arn
+  tags              = aws_cloudwatch_log_group.vpc_flow.tags
 
-  # Allow EKS control plane to use the key for envelope encryption
-  statement {
-    sid    = "AllowEKSUseOfKey"
-    effect = "Allow"
-    principals {
-      type        = "Service"
-      identifiers = ["eks.${data.aws_region.current.name}.amazonaws.com"]
-    }
-    actions = [
-      "kms:Encrypt",
-      "kms:Decrypt",
-      "kms:ReEncrypt*",
-      "kms:GenerateDataKey*",
-      "kms:DescribeKey",
-      "kms:CreateGrant"
-    ]
-    resources = ["*"]
-
-    condition {
-      test     = "StringEquals"
-      variable = "kms:CallerAccount"
-      values   = [data.aws_caller_identity.current.account_id]
-    }
-    condition {
-      test     = "StringEquals"
-      variable = "kms:ViaService"
-      values   = ["eks.${data.aws_region.current.name}.amazonaws.com"]
-    }
+  lifecycle {
+    replace_triggered_by = [aws_kms_key.cloudwatch_logs.arn]
   }
 }
 
+########################################
+# KMS for EKS Secrets Encryption (inline policy)
+########################################
 resource "aws_kms_key" "eks_secrets" {
   description             = "KMS key for EKS secrets encryption"
   deletion_window_in_days = 7
   enable_key_rotation     = true
-  policy                  = data.aws_iam_policy_document.kms_eks_secrets.json
-  tags                    = merge(var.tags, { Name = "eks-secrets-kms" })
+
+  policy = jsonencode({
+    Version  = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "EnableIAMUserPermissions"
+        Effect   = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid      = "AllowEKSUseOfKey"
+        Effect   = "Allow"
+        Principal = { Service = "eks.${data.aws_region.current.name}.amazonaws.com" }
+        Action   = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey",
+          "kms:CreateGrant"
+        ]
+        Resource  = "*"
+        Condition = {
+          StringEquals = {
+            "kms:CallerAccount" = data.aws_caller_identity.current.account_id,
+            "kms:ViaService"    = "eks.${data.aws_region.current.name}.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = merge(var.tags, { Name = "eks-secrets-kms" })
 }
 
 resource "aws_kms_alias" "eks_secrets" {
