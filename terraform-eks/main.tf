@@ -1,5 +1,5 @@
 ########################################
-# Variables (inline for convenience)
+# Variables
 ########################################
 variable "tags" {
   description = "Common tags"
@@ -30,13 +30,12 @@ resource "aws_vpc" "eks" {
   tags = merge(var.tags, { Name = "eks-vpc" })
 }
 
-# Lock down the default SG (required by CKV2_AWS_12)
+# Lock down the default SG (CKV2_AWS_12)
 resource "aws_default_security_group" "this" {
   vpc_id = aws_vpc.eks.id
 
   revoke_rules_on_delete = true
-
-  # No ingress/egress rules = deny all
+  # No rules = deny all
   tags = merge(var.tags, { Name = "eks-default-sg-locked" })
 }
 
@@ -132,12 +131,11 @@ resource "aws_route_table_association" "private_b" {
 ########################################
 # CloudWatch Logs + KMS for VPC Flow Logs
 ########################################
-# KMS policy for CloudWatch Logs (with justified Checkov skips)
-#checkov:skip=CKV_AWS_109: KMS key policies must use Resource="*"; usage is constrained by conditions
-#checkov:skip=CKV_AWS_111: KMS write/management actions constrained via EncryptionContext
-#checkov:skip=CKV_AWS_356: In KMS key policies, Resource must be "*"
+#checkov:skip=CKV_AWS_109: KMS key policies require Resource="*"; access constrained via EncryptionContext condition
+#checkov:skip=CKV_AWS_111: KMS management/write actions required for service usage and are constrained
+#checkov:skip=CKV_AWS_356: KMS key policies must use Resource="*"
 data "aws_iam_policy_document" "kms_cloudwatch_logs" {
-  # AWS's canonical root statement
+  # AWS recommended root permissions stanza
   statement {
     sid     = "EnableIAMUserPermissions"
     effect  = "Allow"
@@ -149,7 +147,7 @@ data "aws_iam_policy_document" "kms_cloudwatch_logs" {
     resources = ["*"]
   }
 
-  # Let CloudWatch Logs use the key for this specific log group via encryption context
+  # Allow CloudWatch Logs to use the key for THIS specific log group via encryption context
   statement {
     sid    = "AllowCloudWatchLogsUseOfKey"
     effect = "Allow"
@@ -200,7 +198,7 @@ resource "aws_iam_role" "vpc_flow" {
     Version = "2012-10-17",
     Statement = [{
       Effect = "Allow",
-      Principal = { Service = "vpc-flow-logs.${data.aws_region.current.name}.amazonaws.com" },
+      Principal = { Service = "vpc-flow-logs.amazonaws.com" },
       Action   = "sts:AssumeRole"
     }]
   })
@@ -230,18 +228,17 @@ resource "aws_flow_log" "this" {
   traffic_type         = "ALL"
   vpc_id               = aws_vpc.eks.id
   iam_role_arn         = aws_iam_role.vpc_flow.arn
-
-  tags = merge(var.tags, { Name = "vpc-flow" })
+  tags                 = merge(var.tags, { Name = "vpc-flow" })
 }
 
 ########################################
 # KMS for EKS Secrets Encryption
 ########################################
-#checkov:skip=CKV_AWS_109: KMS key policies must use Resource="*"; constrained via ViaService/CallerAccount
-#checkov:skip=CKV_AWS_111: Write/management actions constrained by conditions
-#checkov:skip=CKV_AWS_356: In KMS key policies, Resource must be "*"
+#checkov:skip=CKV_AWS_109: KMS key policies require Resource="*"; constrained via CallerAccount/ViaService
+#checkov:skip=CKV_AWS_111: Write/management actions are required by EKS; tightly conditioned
+#checkov:skip=CKV_AWS_356: KMS key policies must use Resource="*"
 data "aws_iam_policy_document" "kms_eks_secrets" {
-  # Canonical root statement
+  # AWS recommended root permissions stanza
   statement {
     sid     = "EnableIAMUserPermissions"
     effect  = "Allow"
@@ -352,7 +349,7 @@ resource "aws_iam_role_policy_attachment" "node_cni" {
 resource "aws_eks_cluster" "this" {
   name     = var.cluster_name
   role_arn = aws_iam_role.eks_cluster.arn
-  version  = "1.30" # pin as you like
+  version  = "1.30"
 
   vpc_config {
     subnet_ids              = [aws_subnet.private_a.id, aws_subnet.private_b.id]
@@ -364,17 +361,13 @@ resource "aws_eks_cluster" "this" {
   enabled_cluster_log_types = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
 
   encryption_config {
-    provider {
-      key_arn = aws_kms_key.eks_secrets.arn
-    }
+    provider { key_arn = aws_kms_key.eks_secrets.arn }
     resources = ["secrets"]
   }
 
   tags = merge(var.tags, { Name = var.cluster_name })
 
-  depends_on = [
-    aws_iam_role_policy_attachment.eks_cluster_policy
-  ]
+  depends_on = [aws_iam_role_policy_attachment.eks_cluster_policy]
 }
 
 resource "aws_eks_node_group" "default" {
