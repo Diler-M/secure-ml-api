@@ -1,94 +1,74 @@
-name: DevSecOps
+name: DevSecOps (Checkov + Terraform Plan EKS)
 
 on:
   push:
     branches: [ main, master ]
   pull_request:
-    branches: [ "**" ]
 
-permissions:
-  contents: read
-
-# ---- Global environment (no expressions used below to avoid parser issues) ----
 env:
   AWS_REGION: eu-west-2
-  CHECKOV_DIRECTORY: terraform-eks
-  CHECKOV_OUTPUT_FORMAT: sarif
-
-concurrency:
-  group: devsecops-${{ github.ref }}
-  cancel-in-progress: true
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VAR_aws: '{"region":"eu-west-2"}'
+  TF_VAR_cluster_name: "secure-ml-eks"
+  TF_VAR_vpc_cidr: "10.0.0.0/16"
+  TF_VAR_tags: '{"Project":"secure-ml-api","Env":"dev"}'
 
 jobs:
   checkov:
-    name: Checkov (Terraform security scan)
+    name: Checkov Scan (Terraform)
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run Checkov
+      - name: Checkov
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: terraform-eks
-          output_format: sarif
           quiet: true
-          soft_fail: false
-          download_external_modules: true
-
-      - name: Upload Checkov SARIF
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: results.sarif
+          output_format: sarif
+          output_file_path: results.sarif
+          log_level: WARNING
 
   terraform-plan-eks:
-    name: Terraform Plan (EKS) - review only
+    name: Terraform Plan (EKS)
     runs-on: ubuntu-latest
     needs: checkov
-    if: ${{ needs.checkov.result == 'success' }}
-
-    # Required for OIDC
-    permissions:
-      id-token: write
-      contents: read
-      pull-requests: write
-
-    env:
-      TF_IN_AUTOMATION: "true"
-      TF_INPUT: "false"
-      TF_VAR_aws_region: eu-west-2
-
+    # Using static AWS keys from repo secrets
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (static keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.6
+          terraform_wrapper: false
 
-      # ===== OIDC =====
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          aws-region: eu-west-2
+      - name: Terraform fmt (check)
+        working-directory: terraform-eks
+        run: terraform fmt -check -recursive
 
-      - name: Terraform Init (EKS)
-        run: terraform -chdir=terraform-eks init -input=false -no-color
+      - name: Terraform Init (non-interactive)
+        working-directory: terraform-eks
+        env:
+          TF_INPUT: "false"
+        run: terraform init -input=false
 
-      - name: Terraform Validate (EKS)
-        run: terraform -chdir=terraform-eks validate -no-color
+      - name: Terraform Validate
+        working-directory: terraform-eks
+        run: terraform validate
 
-      - name: Terraform Plan (EKS)
-        run: terraform -chdir=terraform-eks plan -input=false -no-color -out=tfplan.out
-
-      - name: Show Plan in Job Summary
-        if: always()
-        run: terraform -chdir=terraform-eks show -no-color tfplan.out >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Show Plan in Logs
-        if: always()
-        run: terraform -chdir=terraform-eks show -no-color tfplan.out
+      - name: Terraform Plan (non-interactive)
+        working-directory: terraform-eks
+        env:
+          TF_INPUT: "false"
+        run: terraform plan -input=false -out=tfplan.out
