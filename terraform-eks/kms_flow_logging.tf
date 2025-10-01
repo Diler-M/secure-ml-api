@@ -2,9 +2,9 @@
 # CloudWatch Logs + KMS for VPC Flow Logs (no cycles)
 ############################################################
 
-# KMS policy for CloudWatch Logs (tightened for Checkov)
+# KMS policy for CloudWatch Logs
 data "aws_iam_policy_document" "kms_cloudwatch_logs" {
-  # Admin (resource-scoped)
+  # Admin (resource-scoped to keys in this account/region)
   statement {
     sid     = "EnableAccountAdminForThisKey"
     effect  = "Allow"
@@ -29,7 +29,7 @@ data "aws_iam_policy_document" "kms_cloudwatch_logs" {
     resources = ["arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:key/*"]
   }
 
-  # Allow CloudWatch Logs for specific log group (encryption context) + constrained grants
+  # Allow CloudWatch Logs service to use the key (constrained; no log-group ARN to avoid cycles)
   statement {
     sid    = "AllowCloudWatchLogsUseOfKey"
     effect = "Allow"
@@ -47,15 +47,17 @@ data "aws_iam_policy_document" "kms_cloudwatch_logs" {
     ]
     resources = ["arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:key/*"]
 
-    condition {
-      test     = "ArnEquals"
-      variable = "kms:EncryptionContext:aws:logs:arn"
-      values   = [aws_cloudwatch_log_group.vpc_flow_with_kms.arn]
-    }
+    # Keep grants constrained to AWS services/resources; no reference to log group
     condition {
       test     = "Bool"
       variable = "kms:GrantIsForAWSResource"
       values   = ["true"]
+    }
+    # Also constrain to our account
+    condition {
+      test     = "StringEquals"
+      variable = "kms:CallerAccount"
+      values   = [data.aws_caller_identity.current.account_id]
     }
   }
 }
@@ -97,9 +99,9 @@ resource "aws_iam_role_policy" "vpc_flow" {
     Version = "2012-10-17",
     Statement = [
       {
-        Sid      = "WriteToCloudWatchLogs",
-        Effect   = "Allow",
-        Action   = [
+        Sid    = "WriteToCloudWatchLogs",
+        Effect = "Allow",
+        Action = [
           "logs:CreateLogGroup",
           "logs:CreateLogStream",
           "logs:PutLogEvents",
@@ -112,12 +114,13 @@ resource "aws_iam_role_policy" "vpc_flow" {
   })
 }
 
+# VPC Flow Logs -> send to CloudWatch Logs
 resource "aws_flow_log" "vpc" {
-  vpc_id                   = aws_vpc.eks.id
-  log_destination          = aws_cloudwatch_log_group.vpc_flow_with_kms.arn
-  log_destination_type     = "cloud-watch-logs"
+  vpc_id                      = aws_vpc.eks.id
+  log_destination             = aws_cloudwatch_log_group.vpc_flow_with_kms.arn
+  log_destination_type        = "cloud-watch-logs"
   deliver_logs_permission_arn = aws_iam_role.vpc_flow.arn
-  traffic_type             = "ALL"
+  traffic_type                = "ALL"
 
   tags = merge(var.tags, { Name = "vpc-flow-logs" })
 }
