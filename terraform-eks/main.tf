@@ -12,6 +12,10 @@ provider "aws" {
   region = var.aws_region
 }
 
+# Data sources used in KMS key policies
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
 # -------------------------------
 # VPC and Networking
 # -------------------------------
@@ -19,8 +23,15 @@ resource "aws_vpc" "eks" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
-
   tags = merge(var.tags, { Name = "eks-vpc" })
+}
+
+# Enforce restricted default SG (no ingress/egress)
+# Satisfies CKV2_AWS_12
+resource "aws_default_security_group" "this" {
+  vpc_id = aws_vpc.eks.id
+  # No ingress/egress blocks = deny all
+  tags = merge(var.tags, { Name = "eks-default-sg" })
 }
 
 resource "aws_subnet" "public_a" {
@@ -126,10 +137,10 @@ resource "aws_cloudwatch_log_group" "vpc_flow_with_kms" {
 resource "aws_iam_role" "vpc_flow" {
   name = "vpc-flow-logs-role"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version = "2012-10-17",
     Statement = [{
-      Effect = "Allow"
-      Principal = { Service = "vpc-flow-logs.amazonaws.com" }
+      Effect = "Allow",
+      Principal = { Service = "vpc-flow-logs.amazonaws.com" },
       Action = "sts:AssumeRole"
     }]
   })
@@ -140,24 +151,23 @@ resource "aws_iam_role_policy" "vpc_flow" {
   name = "vpc-flow-logs-policy"
   role = aws_iam_role.vpc_flow.id
 
+
   policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid      = "AllowLogWrites"
-        Effect   = "Allow"
-        Action   = [
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents",
-          "logs:DescribeLogStreams"
-        ]
-        Resource = [
-          aws_cloudwatch_log_group.vpc_flow_with_kms.arn,
-          "${aws_cloudwatch_log_group.vpc_flow_with_kms.arn}:*"
-        ]
-      }
-    ]
+    Version = "2012-10-17",
+    Statement = [{
+      Sid    = "AllowLogWrites",
+      Effect = "Allow",
+      Action = [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      Resource = [
+        aws_cloudwatch_log_group.vpc_flow_with_kms.arn,
+        "${aws_cloudwatch_log_group.vpc_flow_with_kms.arn}:*"
+      ]
+    }]
   })
 }
 
@@ -170,20 +180,89 @@ resource "aws_flow_log" "vpc" {
 }
 
 # -------------------------------
-# KMS keys
+# KMS keys (with explicit policies)
 # -------------------------------
+
+# Satisfies CKV2_AWS_64 for CloudWatch Logs key
 resource "aws_kms_key" "cloudwatch_logs" {
   description             = "KMS key for CloudWatch log encryption"
   deletion_window_in_days = 7
   enable_key_rotation     = true
-  tags                    = merge(var.tags, { Name = "cw-logs-kms" })
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid      = "AllowRootAccountFullAccess",
+        Effect   = "Allow",
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" },
+        Action   = "kms:*",
+        Resource = "*"
+      },
+      {
+        Sid      = "AllowCloudWatchLogsUseOfKey",
+        Effect   = "Allow",
+        Principal = { Service = "logs.${data.aws_region.current.name}.amazonaws.com" },
+        Action   = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ],
+        Resource = "*",
+        Condition = {
+          ArnEquals = {
+            "kms:EncryptionContext:aws:logs:arn" = aws_cloudwatch_log_group.vpc_flow_with_kms.arn
+          }
+        }
+      }
+    ]
+  })
+
+  tags = merge(var.tags, { Name = "cw-logs-kms" })
 }
 
+# Satisfies CKV2_AWS_64 for EKS secrets encryption key
 resource "aws_kms_key" "eks_secrets" {
   description             = "KMS key for EKS secrets encryption"
   deletion_window_in_days = 7
   enable_key_rotation     = true
-  tags                    = merge(var.tags, { Name = "eks-secrets-kms" })
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid      = "AllowRootAccountFullAccess",
+        Effect   = "Allow",
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" },
+        Action   = "kms:*",
+        Resource = "*"
+      },
+      {
+        Sid      = "AllowEKSUseOfKey",
+        Effect   = "Allow",
+        Principal = { Service = "eks.${data.aws_region.current.name}.amazonaws.com" },
+        Action   = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey",
+          "kms:CreateGrant"
+        ],
+        Resource = "*",
+        Condition = {
+          StringEquals = {
+            "kms:CallerAccount" = data.aws_caller_identity.current.account_id,
+            "kms:ViaService"    = "eks.${data.aws_region.current.name}.amazonaws.com"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = merge(var.tags, { Name = "eks-secrets-kms" })
 }
 
 # -------------------------------
@@ -192,10 +271,10 @@ resource "aws_kms_key" "eks_secrets" {
 resource "aws_iam_role" "eks_cluster" {
   name = "eks-cluster-role"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version = "2012-10-17",
     Statement = [{
-      Effect = "Allow"
-      Principal = { Service = "eks.amazonaws.com" }
+      Effect = "Allow",
+      Principal = { Service = "eks.amazonaws.com" },
       Action = "sts:AssumeRole"
     }]
   })
@@ -210,10 +289,10 @@ resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
 resource "aws_iam_role" "eks_node" {
   name = "eks-node-role"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+    Version = "2012-10-17",
     Statement = [{
-      Effect = "Allow"
-      Principal = { Service = "ec2.amazonaws.com" }
+      Effect = "Allow",
+      Principal = { Service = "ec2.amazonaws.com" },
       Action = "sts:AssumeRole"
     }]
   })
@@ -254,7 +333,6 @@ resource "aws_eks_cluster" "this" {
   }
 
   enabled_cluster_log_types = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
-
   tags = var.tags
 }
 

@@ -1,63 +1,28 @@
+# -------- Variables used by main.tf --------
+
 variable "aws_region" {
+  type        = string
   description = "AWS region to deploy to"
-  type        = string
-}
-
-variable "cluster_name" {
-  description = "EKS cluster name"
-  type        = string
-}
-
-variable "tags" {
-  description = "Common tags to apply to all resources"
-  type        = map(string)
-  default     = {}
+  default     = "us-east-1"
 }
 
 variable "vpc_cidr" {
-  description = "CIDR for the EKS VPC"
   type        = string
+  description = "CIDR block for the EKS VPC"
   default     = "10.1.0.0/16"
 }
 
-variable "public_subnet_cidrs" {
-  description = "CIDRs for public subnets"
-  type        = list(string)
-  default     = ["10.1.0.0/24", "10.1.1.0/24"]
-}
-
-variable "private_subnet_cidrs" {
-  description = "CIDRs for private subnets"
-  type        = list(string)
-  default     = ["10.1.10.0/24", "10.1.11.0/24"]
-}
-
-variable "kubernetes_version" {
-  description = "EKS Kubernetes version"
+variable "cluster_name" {
   type        = string
-  default     = "1.29"
+  description = "EKS cluster name"
+  default     = "secure-ml-eks"
 }
 
-variable "desired_size" {
-  description = "Desired node count"
-  type        = number
-  default     = 2
-}
-
-variable "min_size" {
-  description = "Min node count"
-  type        = number
-  default     = 2
-}
-
-variable "max_size" {
-  description = "Max node count"
-  type        = number
-  default     = 4
-}
-
-variable "instance_types" {
-  description = "EC2 instance types for node group"
-  type        = list(string)
-  default     = ["t3.medium"]
+variable "tags" {
+  type        = map(string)
+  description = "Common tags to apply to all resources"
+  default = {
+    Project     = "secure-ml-api"
+    Environment = "dev"
+  }
 }

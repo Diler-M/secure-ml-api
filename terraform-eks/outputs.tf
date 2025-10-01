@@ -1,4 +1,4 @@
-output "cluster_name" {
+/* output "cluster_name" {
   description = "EKS cluster name"
   value       = aws_eks_cluster.this.name
 }
@@ -22,3 +22,4 @@ output "vpc_id" {
   description = "VPC ID"
   value       = aws_vpc.eks.id
 }
+*/
