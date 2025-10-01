@@ -10,13 +10,24 @@ resource "aws_vpc" "eks" {
   tags = merge(var.tags, { Name = "eks-vpc" })
 }
 
+# Lock down the default security group (CKV2_AWS_12)
+resource "aws_default_security_group" "default" {
+  vpc_id                 = aws_vpc.eks.id
+  revoke_rules_on_delete = true
+  # No ingress/egress blocks -> fully restricted
+  tags = merge(var.tags, { Name = "eks-default-sg-locked" })
+}
+
 # Public subnets (no auto-assign public IPs by default)
 resource "aws_subnet" "public_a" {
   vpc_id                  = aws_vpc.eks.id
   cidr_block              = var.public_subnet_cidrs[0]
   map_public_ip_on_launch = false
   availability_zone       = "${var.aws_region}a"
-  tags = merge(var.tags, { Name = "public-a", "kubernetes.io/role/elb" = "1" })
+  tags = merge(
+    var.tags,
+    { Name = "public-a", "kubernetes.io/role/elb" = "1" }
+  )
 }
 
 resource "aws_subnet" "public_b" {
@@ -24,7 +35,10 @@ resource "aws_subnet" "public_b" {
   cidr_block              = var.public_subnet_cidrs[1]
   map_public_ip_on_launch = false
   availability_zone       = "${var.aws_region}b"
-  tags = merge(var.tags, { Name = "public-b", "kubernetes.io/role/elb" = "1" })
+  tags = merge(
+    var.tags,
+    { Name = "public-b", "kubernetes.io/role/elb" = "1" }
+  )
 }
 
 # Private subnets
@@ -33,7 +47,10 @@ resource "aws_subnet" "private_a" {
   cidr_block              = var.private_subnet_cidrs[0]
   map_public_ip_on_launch = false
   availability_zone       = "${var.aws_region}a"
-  tags = merge(var.tags, { Name = "private-a", "kubernetes.io/role/internal-elb" = "1" })
+  tags = merge(
+    var.tags,
+    { Name = "private-a", "kubernetes.io/role/internal-elb" = "1" }
+  )
 }
 
 resource "aws_subnet" "private_b" {
@@ -41,7 +58,10 @@ resource "aws_subnet" "private_b" {
   cidr_block              = var.private_subnet_cidrs[1]
   map_public_ip_on_launch = false
   availability_zone       = "${var.aws_region}b"
-  tags = merge(var.tags, { Name = "private-b", "kubernetes.io/role/internal-elb" = "1" })
+  tags = merge(
+    var.tags,
+    { Name = "private-b", "kubernetes.io/role/internal-elb" = "1" }
+  )
 }
 
 resource "aws_internet_gateway" "igw" {
@@ -142,7 +162,17 @@ resource "aws_iam_role_policy" "vpc_flow" {
   })
 }
 
-# KMS for CloudWatch Logs
+############################
+# KMS for CloudWatch Logs  #
+############################
+
+resource "aws_kms_key" "cloudwatch_logs" {
+  description             = "KMS key for CloudWatch log encryption"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+  tags                    = merge(var.tags, { Name = "cw-logs-kms" })
+}
+
 data "aws_iam_policy_document" "kms_cloudwatch_logs" {
   statement {
     sid     = "EnableIAMUserPermissions"
@@ -151,8 +181,12 @@ data "aws_iam_policy_document" "kms_cloudwatch_logs" {
       type        = "AWS"
       identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
     }
-    actions   = ["kms:*"]
-    resources = ["*"]
+    actions = [
+      "kms:Create*","kms:Describe*","kms:Enable*","kms:List*","kms:Put*",
+      "kms:Update*","kms:Revoke*","kms:Disable*","kms:Get*","kms:Delete*",
+      "kms:ScheduleKeyDeletion","kms:CancelKeyDeletion","kms:TagResource","kms:UntagResource"
+    ]
+    resources = [aws_kms_key.cloudwatch_logs.arn]
   }
 
   statement {
@@ -162,8 +196,8 @@ data "aws_iam_policy_document" "kms_cloudwatch_logs" {
       type        = "Service"
       identifiers = ["logs.${data.aws_region.current.name}.amazonaws.com"]
     }
-    actions = ["kms:Encrypt","kms:Decrypt","kms:ReEncrypt*","kms:GenerateDataKey*","kms:DescribeKey"]
-    resources = ["*"]
+    actions   = ["kms:Encrypt","kms:Decrypt","kms:ReEncrypt*","kms:GenerateDataKey*","kms:DescribeKey"]
+    resources = [aws_kms_key.cloudwatch_logs.arn]
 
     condition {
       test     = "ArnEquals"
@@ -173,19 +207,33 @@ data "aws_iam_policy_document" "kms_cloudwatch_logs" {
   }
 }
 
-resource "aws_kms_key" "cloudwatch_logs" {
-  description             = "KMS key for CloudWatch log encryption"
-  deletion_window_in_days = 7
-  enable_key_rotation     = true
-  policy                  = data.aws_iam_policy_document.kms_cloudwatch_logs.json
-  tags                    = merge(var.tags, { Name = "cw-logs-kms" })
+resource "aws_kms_key_policy" "cloudwatch_logs" {
+  key_id = aws_kms_key.cloudwatch_logs.key_id
+  policy = data.aws_iam_policy_document.kms_cloudwatch_logs.json
 }
 
+# Single log group (no duplicate resource). It depends on the key (kms_key_id),
+# while the key policy depends on this log group (via ARN) — no cycle:
+# key -> log group -> key policy
 resource "aws_cloudwatch_log_group" "vpc_flow_with_kms" {
   name              = "/aws/vpc/flow-logs"
   retention_in_days = 400
   kms_key_id        = aws_kms_key.cloudwatch_logs.arn
   tags              = merge(var.tags, { Name = "vpc-flow-logs" })
+}
+
+resource "aws_cloudwatch_log_resource_policy" "allow_vpc_flow_to_use_log_group" {
+  policy_name     = "${var.cluster_name}-vpc-flow-cw-policy"
+  policy_document = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Sid      = "AllowVPCAccessToLogGroup",
+      Effect   = "Allow",
+      Action   = ["logs:CreateLogStream","logs:PutLogEvents","logs:DescribeLogStreams"],
+      Resource = "${aws_cloudwatch_log_group.vpc_flow_with_kms.arn}:*",
+      Principal = { Service = "vpc-flow-logs.amazonaws.com" }
+    }]
+  })
 }
 
 resource "aws_flow_log" "vpc" {
@@ -201,6 +249,13 @@ resource "aws_flow_log" "vpc" {
 # KMS for EKS Secrets      #
 ############################
 
+resource "aws_kms_key" "eks_secrets" {
+  description             = "KMS key for EKS secrets encryption"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+  tags                    = merge(var.tags, { Name = "eks-secrets-kms" })
+}
+
 data "aws_iam_policy_document" "kms_eks_secrets" {
   statement {
     sid     = "EnableIAMUserPermissions"
@@ -209,8 +264,12 @@ data "aws_iam_policy_document" "kms_eks_secrets" {
       type        = "AWS"
       identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
     }
-    actions   = ["kms:*"]
-    resources = ["*"]
+    actions = [
+      "kms:Create*","kms:Describe*","kms:Enable*","kms:List*","kms:Put*",
+      "kms:Update*","kms:Revoke*","kms:Disable*","kms:Get*","kms:Delete*",
+      "kms:ScheduleKeyDeletion","kms:CancelKeyDeletion","kms:TagResource","kms:UntagResource"
+    ]
+    resources = [aws_kms_key.eks_secrets.arn]
   }
 
   statement {
@@ -221,7 +280,7 @@ data "aws_iam_policy_document" "kms_eks_secrets" {
       identifiers = ["eks.${data.aws_region.current.name}.amazonaws.com"]
     }
     actions   = ["kms:Encrypt","kms:Decrypt","kms:ReEncrypt*","kms:GenerateDataKey*","kms:DescribeKey","kms:CreateGrant"]
-    resources = ["*"]
+    resources = [aws_kms_key.eks_secrets.arn]
 
     condition {
       test     = "StringEquals"
@@ -236,12 +295,9 @@ data "aws_iam_policy_document" "kms_eks_secrets" {
   }
 }
 
-resource "aws_kms_key" "eks_secrets" {
-  description             = "KMS key for EKS secrets encryption"
-  deletion_window_in_days = 7
-  enable_key_rotation     = true
-  policy                  = data.aws_iam_policy_document.kms_eks_secrets.json
-  tags                    = merge(var.tags, { Name = "eks-secrets-kms" })
+resource "aws_kms_key_policy" "eks_secrets" {
+  key_id = aws_kms_key.eks_secrets.key_id
+  policy = data.aws_iam_policy_document.kms_eks_secrets.json
 }
 
 ############################
@@ -314,7 +370,10 @@ resource "aws_eks_cluster" "this" {
 
   tags = merge(var.tags, { Name = var.cluster_name })
 
-  depends_on = [aws_iam_role_policy_attachment.eks_cluster_policy]
+  depends_on = [
+    aws_kms_key_policy.eks_secrets,
+    aws_iam_role_policy_attachment.eks_cluster_policy
+  ]
 }
 
 resource "aws_eks_node_group" "default" {
