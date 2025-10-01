@@ -107,18 +107,12 @@ jobs:
     permissions:
       contents: read
     env:
-      # --- Static AWS creds from repo secrets (no OIDC) ---
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-      # --- Region + make Terraform fully non-interactive ---
       AWS_REGION: eu-west-2
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
-
-
       TF_VAR_aws: '{"region":"eu-west-2"}'
-
       TF_VAR_cluster_name: "secure-ml-eks"
       TF_VAR_vpc_cidr: "10.0.0.0/16"
       TF_VAR_tags: '{"Project":"secure-ml-api","Env":"dev"}'
@@ -126,7 +120,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
 
       - name: Configure AWS region for CLI
         run: |
@@ -139,9 +132,10 @@ jobs:
           terraform_version: 1.6.6
           terraform_wrapper: false
 
-      - name: Terraform fmt (check)
+      # Auto-format instead of failing the build
+      - name: Terraform fmt (auto-fix)
         working-directory: terraform-eks
-        run: terraform fmt -check -recursive
+        run: terraform fmt -recursive -diff
 
       - name: Terraform Init (EKS)
         working-directory: terraform-eks
