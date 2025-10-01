@@ -1,6 +1,10 @@
 ############################################################
-# CloudWatch Logs + KMS for VPC Flow Logs (no cycles)
+# CloudWatch Logs + KMS for VPC Flow Logs
 ############################################################
+
+# Required identity/region data
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
 
 # KMS policy for CloudWatch Logs
 data "aws_iam_policy_document" "kms_cloudwatch_logs" {
@@ -29,7 +33,7 @@ data "aws_iam_policy_document" "kms_cloudwatch_logs" {
     resources = ["arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:key/*"]
   }
 
-  # Allow CloudWatch Logs service to use the key (constrained; no log-group ARN to avoid cycles)
+  # Allow CloudWatch Logs service to use the key
   statement {
     sid    = "AllowCloudWatchLogsUseOfKey"
     effect = "Allow"
@@ -47,13 +51,13 @@ data "aws_iam_policy_document" "kms_cloudwatch_logs" {
     ]
     resources = ["arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:key/*"]
 
-    # Keep grants constrained to AWS services/resources; no reference to log group
+    # Keep grants constrained to AWS resources
     condition {
       test     = "Bool"
       variable = "kms:GrantIsForAWSResource"
       values   = ["true"]
     }
-    # Also constrain to our account
+    # Constrain to our account
     condition {
       test     = "StringEquals"
       variable = "kms:CallerAccount"
@@ -114,13 +118,13 @@ resource "aws_iam_role_policy" "vpc_flow" {
   })
 }
 
-# VPC Flow Logs -> send to CloudWatch Logs
+# VPC Flow Logs -> CloudWatch Logs
 resource "aws_flow_log" "vpc" {
-  vpc_id                      = aws_vpc.eks.id
-  log_destination             = aws_cloudwatch_log_group.vpc_flow_with_kms.arn
-  log_destination_type        = "cloud-watch-logs"
-  deliver_logs_permission_arn = aws_iam_role.vpc_flow.arn
-  traffic_type                = "ALL"
+  vpc_id               = aws_vpc.eks.id
+  log_destination      = aws_cloudwatch_log_group.vpc_flow_with_kms.arn
+  log_destination_type = "cloud-watch-logs"
+  iam_role_arn         = aws_iam_role.vpc_flow.arn   # <- replaced deliver_logs_permission_arn
+  traffic_type         = "ALL"
 
   tags = merge(var.tags, { Name = "vpc-flow-logs" })
 }
