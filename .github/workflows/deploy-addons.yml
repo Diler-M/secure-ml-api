@@ -1,0 +1,102 @@
+name: Deploy EKS Addons (Prometheus, Grafana, Falco)
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster_name:
+        description: "EKS cluster name"
+        required: true
+      aws_region:
+        description: "AWS region"
+        required: true
+        default: "eu-west-2"
+
+permissions:
+  contents: read
+
+env:
+  CLUSTER_NAME: ${{ inputs.cluster_name }}
+  AWS_REGION: ${{ inputs.aws_region }}
+
+jobs:
+  deploy-addons:
+    name: Deploy Prometheus/Grafana + Falco
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl and helm
+        run: |
+          curl -sSL -o kubectl https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+          curl -sSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
+
+      - name: Create namespaces
+        run: |
+          kubectl get ns monitoring >/dev/null 2>&1 || kubectl create ns monitoring
+          kubectl get ns falco >/dev/null 2>&1 || kubectl create ns falco
+
+      - name: Write values files
+        run: |
+          mkdir -p addons
+          cat > addons/values-kube-prometheus.yaml << 'EOF'
+          grafana:
+            enabled: true
+            adminPassword: admin
+            service:
+              type: ClusterIP
+            ingress:
+              enabled: false
+          prometheus:
+            service:
+              type: ClusterIP
+          alertmanager:
+            enabled: true
+            service:
+              type: ClusterIP
+          EOF
+
+          cat > addons/values-falco.yaml << 'EOF'
+          falcosidekick:
+            enabled: false
+          driver:
+            kind: modern-bpf
+          jsonOutput: true
+          EOF
+
+      - name: Add Helm repos
+        run: |
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo add falcosecurity https://falcosecurity.github.io/charts
+          helm repo update
+
+      - name: Install/Upgrade kube-prometheus-stack
+        run: |
+          helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+            --namespace monitoring \
+            --values addons/values-kube-prometheus.yaml
+
+      - name: Install/Upgrade Falco
+        run: |
+          helm upgrade --install falco falcosecurity/falco \
+            --namespace falco \
+            --values addons/values-falco.yaml
+
+      - name: Show services
+        run: |
+          echo "--- monitoring services ---"
+          kubectl get svc -n monitoring
+          echo "--- falco daemonset ---"
+          kubectl get ds -n falco
