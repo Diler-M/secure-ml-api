@@ -1,57 +1,63 @@
 variable "aws_region" {
-  description = "AWS region"
+  description = "AWS region to deploy to"
   type        = string
-  default     = "us-east-1"
-}
-
-# Availability zone suffixes (keeps it multi-AZ without hardcoding)
-variable "az_a_suffix" {
-  description = "Suffix for AZ A"
-  type        = string
-  default     = "a"
-}
-
-variable "az_b_suffix" {
-  description = "Suffix for AZ B"
-  type        = string
-  default     = "b"
 }
 
 variable "cluster_name" {
   description = "EKS cluster name"
   type        = string
-  default     = "secure-ml-eks"
 }
 
-variable "node_desired_size" {
-  description = "Desired size of node group"
+variable "tags" {
+  description = "Common tags to apply to all resources"
+  type        = map(string)
+  default     = {}
+}
+
+variable "vpc_cidr" {
+  description = "CIDR for the EKS VPC"
+  type        = string
+  default     = "10.1.0.0/16"
+}
+
+variable "public_subnet_cidrs" {
+  description = "CIDRs for public subnets"
+  type        = list(string)
+  default     = ["10.1.0.0/24", "10.1.1.0/24"]
+}
+
+variable "private_subnet_cidrs" {
+  description = "CIDRs for private subnets"
+  type        = list(string)
+  default     = ["10.1.10.0/24", "10.1.11.0/24"]
+}
+
+variable "kubernetes_version" {
+  description = "EKS Kubernetes version"
+  type        = string
+  default     = "1.29"
+}
+
+variable "desired_size" {
+  description = "Desired node count"
   type        = number
   default     = 2
 }
 
-variable "node_min_size" {
-  description = "Min size of node group"
+variable "min_size" {
+  description = "Min node count"
   type        = number
   default     = 2
 }
 
-variable "node_max_size" {
-  description = "Max size of node group"
+variable "max_size" {
+  description = "Max node count"
   type        = number
   default     = 4
 }
 
-variable "node_instance_types" {
+variable "instance_types" {
   description = "EC2 instance types for node group"
   type        = list(string)
   default     = ["t3.medium"]
-}
-
-variable "tags" {
-  description = "Common tags"
-  type        = map(string)
-  default     = {
-    Project = "secure-ml-api"
-    Owner   = "Diler"
-  }
 }
