@@ -1,25 +1,29 @@
-/* output "cluster_name" {
+output "cluster_name" {
   description = "EKS cluster name"
   value       = aws_eks_cluster.this.name
 }
 
 output "cluster_endpoint" {
-  description = "Private endpoint URL for the EKS cluster"
+  description = "EKS cluster API endpoint"
   value       = aws_eks_cluster.this.endpoint
 }
 
-output "eks_cluster_role_arn" {
-  description = "EKS cluster IAM role ARN"
-  value       = aws_iam_role.eks_cluster.arn
+output "cluster_version" {
+  description = "EKS Kubernetes version"
+  value       = aws_eks_cluster.this.version
 }
 
-output "eks_node_role_arn" {
-  description = "EKS node IAM role ARN"
-  value       = aws_iam_role.eks_node.arn
+output "node_group_name" {
+  description = "Default node group name"
+  value       = aws_eks_node_group.default.node_group_name
 }
 
 output "vpc_id" {
-  description = "VPC ID"
+  description = "VPC ID used by the EKS cluster"
   value       = aws_vpc.eks.id
 }
-*/
+
+output "private_subnet_ids" {
+  description = "Private subnet IDs for worker nodes"
+  value       = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+}
