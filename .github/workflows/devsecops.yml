@@ -1,51 +1,137 @@
-name: DevSecOps (Checkov + Terraform Plan EKS)
+name: DevSecOps Pipeline (EKS)
 
 on:
   push:
-    branches: [ main, part-2 ]
+    branches: [ "main", "part-2" ]
   pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
 
-env:
-  AWS_REGION: eu-west-2
-  TF_IN_AUTOMATION: "true"
-  TF_INPUT: "false"
-  TF_VAR_aws: '{"region":"eu-west-2"}'
-  TF_VAR_cluster_name: "secure-ml-eks"
-  TF_VAR_vpc_cidr: "10.0.0.0/16"
-  TF_VAR_tags: '{"Project":"secure-ml-api","Env":"dev"}'
+permissions: {}
 
 jobs:
-  checkov:
-    name: Checkov Scan (Terraform)
+  codeql:
+    name: CodeQL (SAST)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Checkov
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+
+  trivy:
+    name: Trivy (Image + EKS IaC)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image for scan
+        run: docker build -t secure-ml-api:latest .
+
+      - name: Trivy (Image) - fail on HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@0.12.0
+        with:
+          image-ref: secure-ml-api:latest
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+
+      - name: Trivy (Terraform IaC for EKS) - fail on HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@0.12.0
+        with:
+          scan-type: fs
+          scan-ref: terraform-eks
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+
+  checkov:
+    name: Checkov (EKS Terraform policy)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkov scan
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: terraform-eks
-          quiet: true
-          output_format: sarif
-          output_file_path: results.sarif
-          log_level: WARNING
+          soft_fail: false
 
-  terraform-plan-eks:
-    name: Terraform Plan (EKS)
+  sbom:
+    name: SBOM (Syft)
     runs-on: ubuntu-latest
-    needs: checkov
-    # Using static AWS keys from repo secrets
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (static keys)
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Build image for SBOM
+        run: docker build -t secure-ml-api:latest .
+
+      - name: Generate SBOM (SPDX JSON)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            anchore/syft:latest packages docker:secure-ml-api:latest -o spdx-json > sbom.spdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          name: sbom
+          path: sbom.spdx.json
+
+  terraform-plan:
+    name: Terraform Plan (EKS) — review only
+    runs-on: ubuntu-latest
+    needs: [trivy, checkov, sbom]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      # --- Static AWS creds from repo secrets (no OIDC) ---
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      # --- Region + make Terraform fully non-interactive ---
+      AWS_REGION: eu-west-2
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+
+
+      TF_VAR_aws: '{"region":"eu-west-2"}'
+
+      TF_VAR_cluster_name: "secure-ml-eks"
+      TF_VAR_vpc_cidr: "10.0.0.0/16"
+      TF_VAR_tags: '{"Project":"secure-ml-api","Env":"dev"}'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      - name: Configure AWS region for CLI
+        run: |
+          aws --version
+          aws configure set region "$AWS_REGION"
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -57,7 +143,7 @@ jobs:
         working-directory: terraform-eks
         run: terraform fmt -check -recursive
 
-      - name: Terraform Init (non-interactive)
+      - name: Terraform Init (EKS)
         working-directory: terraform-eks
         env:
           TF_INPUT: "false"
@@ -67,7 +153,7 @@ jobs:
         working-directory: terraform-eks
         run: terraform validate
 
-      - name: Terraform Plan (non-interactive)
+      - name: Terraform Plan (EKS)
         working-directory: terraform-eks
         env:
           TF_INPUT: "false"
