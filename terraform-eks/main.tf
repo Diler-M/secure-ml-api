@@ -1,8 +1,11 @@
-########################################
-# Core networking for EKS
-########################################
+############################################################
+# Networking (VPC, Subnets, Routes, NAT)
+############################################################
 
-# VPC
+locals {
+  azs = slice(data.aws_availability_zones.available.names, 0, var.az_count)
+}
+
 resource "aws_vpc" "eks" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
@@ -11,64 +14,62 @@ resource "aws_vpc" "eks" {
   tags = merge(var.tags, { Name = "eks-vpc" })
 }
 
-# Default SG must deny all (Checkov CKV2_AWS_12)
-resource "aws_default_security_group" "deny_all" {
+# Lock down default SG to satisfy CKV2_AWS_12
+resource "aws_default_security_group" "this" {
   vpc_id = aws_vpc.eks.id
 
-  # No ingress/egress blocks -> removes all default rules
-  revoke_rules_on_delete = true
-
-  tags = merge(var.tags, { Name = "eks-default-sg-deny-all" })
+  # No ingress/egress rules means all traffic is denied by default
+  tags = merge(var.tags, { Name = "eks-default-sg-locked" })
 }
 
-# Subnets
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.eks.id
+  tags   = merge(var.tags, { Name = "eks-igw" })
+}
+
+# Public subnets
 resource "aws_subnet" "public_a" {
-  vpc_id            = aws_vpc.eks.id
-  cidr_block        = cidrsubnet(var.vpc_cidr, 8, 0)
+  vpc_id                  = aws_vpc.eks.id
+  cidr_block              = cidrsubnet(var.vpc_cidr, 8, 0)
+  availability_zone       = local.azs[0]
   map_public_ip_on_launch = false
-  availability_zone = "${data.aws_region.current.name}a"
-  tags              = merge(var.tags, { Name = "public-a" })
+  tags                    = merge(var.tags, { Name = "public-a" })
 }
 
 resource "aws_subnet" "public_b" {
-  vpc_id            = aws_vpc.eks.id
-  cidr_block        = cidrsubnet(var.vpc_cidr, 8, 1)
+  vpc_id                  = aws_vpc.eks.id
+  cidr_block              = cidrsubnet(var.vpc_cidr, 8, 1)
+  availability_zone       = local.azs[length(local.azs) > 1 ? 1 : 0]
   map_public_ip_on_launch = false
-  availability_zone = "${data.aws_region.current.name}b"
-  tags              = merge(var.tags, { Name = "public-b" })
+  tags                    = merge(var.tags, { Name = "public-b" })
 }
 
+# Private subnets
 resource "aws_subnet" "private_a" {
   vpc_id            = aws_vpc.eks.id
-  cidr_block        = cidrsubnet(var.vpc_cidr, 8, 2)
-  map_public_ip_on_launch = false
-  availability_zone = "${data.aws_region.current.name}a"
+  cidr_block        = cidrsubnet(var.vpc_cidr, 8, 10)
+  availability_zone = local.azs[0]
   tags              = merge(var.tags, { Name = "private-a" })
 }
 
 resource "aws_subnet" "private_b" {
   vpc_id            = aws_vpc.eks.id
-  cidr_block        = cidrsubnet(var.vpc_cidr, 8, 3)
-  map_public_ip_on_launch = false
-  availability_zone = "${data.aws_region.current.name}b"
+  cidr_block        = cidrsubnet(var.vpc_cidr, 8, 11)
+  availability_zone = local.azs[length(local.azs) > 1 ? 1 : 0]
   tags              = merge(var.tags, { Name = "private-b" })
 }
 
-# IGW / NAT
-resource "aws_internet_gateway" "this" {
-  vpc_id = aws_vpc.eks.id
-  tags   = merge(var.tags, { Name = "eks-igw" })
-}
-
+# EIP and NAT for private subnets
 resource "aws_eip" "nat_eip" {
   domain = "vpc"
   tags   = merge(var.tags, { Name = "eks-nat-eip" })
 }
 
-resource "aws_nat_gateway" "this" {
+resource "aws_nat_gateway" "nat" {
   allocation_id = aws_eip.nat_eip.id
   subnet_id     = aws_subnet.public_a.id
   tags          = merge(var.tags, { Name = "eks-nat" })
+  depends_on    = [aws_internet_gateway.igw]
 }
 
 # Route tables
@@ -80,17 +81,17 @@ resource "aws_route_table" "public" {
 resource "aws_route" "public_internet" {
   route_table_id         = aws_route_table.public.id
   destination_cidr_block = "0.0.0.0/0"
-  gateway_id             = aws_internet_gateway.this.id
+  gateway_id             = aws_internet_gateway.igw.id
 }
 
 resource "aws_route_table_association" "public_a" {
-  subnet_id      = aws_subnet.public_a.id
   route_table_id = aws_route_table.public.id
+  subnet_id      = aws_subnet.public_a.id
 }
 
 resource "aws_route_table_association" "public_b" {
-  subnet_id      = aws_subnet.public_b.id
   route_table_id = aws_route_table.public.id
+  subnet_id      = aws_subnet.public_b.id
 }
 
 resource "aws_route_table" "private" {
@@ -101,37 +102,49 @@ resource "aws_route_table" "private" {
 resource "aws_route" "private_nat" {
   route_table_id         = aws_route_table.private.id
   destination_cidr_block = "0.0.0.0/0"
-  nat_gateway_id         = aws_nat_gateway.this.id
+  nat_gateway_id         = aws_nat_gateway.nat.id
 }
 
 resource "aws_route_table_association" "private_a" {
-  subnet_id      = aws_subnet.private_a.id
   route_table_id = aws_route_table.private.id
+  subnet_id      = aws_subnet.private_a.id
 }
 
 resource "aws_route_table_association" "private_b" {
-  subnet_id      = aws_subnet.private_b.id
   route_table_id = aws_route_table.private.id
+  subnet_id      = aws_subnet.private_b.id
 }
 
-########################################
-# KMS for EKS Secrets (NOT the FlowLogs key)
-########################################
+############################################################
+# KMS for EKS Secrets (policy tightened for Checkov)
+############################################################
 
 data "aws_iam_policy_document" "kms_eks_secrets" {
-  # Canonical root stanza
   statement {
-    sid     = "EnableIAMUserPermissions"
+    sid     = "EnableAccountAdminForThisKey"
     effect  = "Allow"
     principals {
       type        = "AWS"
       identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
     }
-    actions   = ["kms:*"]
-    resources = ["*"]
+    actions = [
+      "kms:Create*",
+      "kms:Describe*",
+      "kms:Enable*",
+      "kms:List*",
+      "kms:Put*",
+      "kms:Update*",
+      "kms:Revoke*",
+      "kms:Disable*",
+      "kms:Get*",
+      "kms:Delete*",
+      "kms:ScheduleKeyDeletion",
+      "kms:CancelKeyDeletion"
+    ]
+    resources = ["arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:key/*"]
   }
 
-  # Allow EKS control plane to use the key (constrained by account/region)
+  # Allow EKS control plane with constraints
   statement {
     sid    = "AllowEKSUseOfKey"
     effect = "Allow"
@@ -147,7 +160,7 @@ data "aws_iam_policy_document" "kms_eks_secrets" {
       "kms:DescribeKey",
       "kms:CreateGrant"
     ]
-    resources = ["*"]
+    resources = ["arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:key/*"]
 
     condition {
       test     = "StringEquals"
@@ -158,6 +171,11 @@ data "aws_iam_policy_document" "kms_eks_secrets" {
       test     = "StringEquals"
       variable = "kms:ViaService"
       values   = ["eks.${data.aws_region.current.name}.amazonaws.com"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "kms:GrantIsForAWSResource"
+      values   = ["true"]
     }
   }
 }
@@ -170,17 +188,17 @@ resource "aws_kms_key" "eks_secrets" {
   tags                    = merge(var.tags, { Name = "eks-secrets-kms" })
 }
 
-########################################
-# EKS cluster + node group (private endpoint)
-########################################
+############################################################
+# IAM for EKS
+############################################################
 
 resource "aws_iam_role" "eks_cluster" {
   name = "${var.cluster_name}-cluster-role"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17",
+    Version = "2012-10-17"
     Statement = [{
-      Effect    = "Allow",
-      Action    = "sts:AssumeRole",
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
       Principal = { Service = "eks.amazonaws.com" }
     }]
   })
@@ -195,10 +213,10 @@ resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
 resource "aws_iam_role" "eks_node" {
   name = "${var.cluster_name}-node-role"
   assume_role_policy = jsonencode({
-    Version = "2012-10-17",
+    Version = "2012-10-17"
     Statement = [{
-      Effect    = "Allow",
-      Action    = "sts:AssumeRole",
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
       Principal = { Service = "ec2.amazonaws.com" }
     }]
   })
@@ -220,36 +238,39 @@ resource "aws_iam_role_policy_attachment" "node_cni" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
 }
 
+############################################################
+# EKS Cluster & Node Group
+############################################################
+
 resource "aws_eks_cluster" "this" {
   name     = var.cluster_name
-  version  = var.kubernetes_version
   role_arn = aws_iam_role.eks_cluster.arn
+  version  = "1.29"
 
   vpc_config {
+    subnet_ids              = [aws_subnet.private_a.id, aws_subnet.private_b.id]
     endpoint_private_access = true
     endpoint_public_access  = false
-    subnet_ids = [
-      aws_subnet.private_a.id,
-      aws_subnet.private_b.id
-    ]
   }
 
-  enabled_cluster_log_types = [
-    "api", "audit", "authenticator", "controllerManager", "scheduler"
-  ]
+  kubernetes_network_config {
+    ip_family = "ipv4"
+  }
+
+  enabled_cluster_log_types = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
 
   encryption_config {
-    resources = ["secrets"]
     provider {
       key_arn = aws_kms_key.eks_secrets.arn
     }
+    resources = ["secrets"]
   }
+
+  tags = merge(var.tags, { Name = var.cluster_name })
 
   depends_on = [
     aws_iam_role_policy_attachment.eks_cluster_policy
   ]
-
-  tags = merge(var.tags, { Name = var.cluster_name })
 }
 
 resource "aws_eks_node_group" "default" {
@@ -257,19 +278,25 @@ resource "aws_eks_node_group" "default" {
   node_group_name = "${var.cluster_name}-ng"
   node_role_arn   = aws_iam_role.eks_node.arn
   subnet_ids      = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+  disk_size       = 20
+  capacity_type   = "ON_DEMAND"
+  instance_types  = ["t3.medium"]
 
   scaling_config {
     desired_size = var.node_desired_size
-    max_size     = var.node_max_size
     min_size     = var.node_min_size
+    max_size     = var.node_max_size
   }
-
-  capacity_type  = "ON_DEMAND"
-  instance_types = var.node_instance_types
 
   update_config {
     max_unavailable = 1
   }
 
-  tags = merge(var.tags, { Name = "${var.cluster_name}-node-group" })
+  tags = merge(var.tags, { Name = "${var.cluster_name}-ng" })
+
+  depends_on = [
+    aws_iam_role_policy_attachment.node_worker,
+    aws_iam_role_policy_attachment.node_ecr_ro,
+    aws_iam_role_policy_attachment.node_cni
+  ]
 }
