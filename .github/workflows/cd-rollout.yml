@@ -1,0 +1,127 @@
+name: CD: Update EKS Rollout with Signed Image
+
+on:
+  # Automatically runs after your publish/sign workflow succeeds on main
+  workflow_run:
+    workflows: ["Publish & Sign (Cosign keyless)"]
+    types: [completed]
+    branches: [main]
+
+  # Allows for manual runs too
+  workflow_dispatch:
+    inputs:
+      cluster_name:
+        description: "EKS cluster name"
+        required: true
+        default: "secure-ml-eks"
+      aws_region:
+        description: "AWS region"
+        required: true
+        default: "eu-west-2"
+      image_ref:
+        description: "Override image (e.g. docker.io/you/secure-ml-api:TAG). Leave empty to use head SHA from triggering run."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write    # needed for cosign keyless verify (OIDC)
+
+env:
+  # Default values for manual dispatch fallback
+  FALLBACK_CLUSTER_NAME: ${{ inputs.cluster_name }}
+  FALLBACK_AWS_REGION:   ${{ inputs.aws_region }}
+
+jobs:
+  update-rollout:
+    name: Patch Rollout to latest signed image
+    if: >
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+      || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    env:
+      # If triggered by workflow_run, use the head SHA of that successful run.
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      AWS_REGION: ${{ inputs.aws_region || 'eu-west-2' }}
+      CLUSTER_NAME: ${{ inputs.cluster_name || 'secure-ml-eks' }}
+      # Construct image ref from your Docker Hub username + head SHA unless user provided override
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      IMAGE_REF_INPUT: ${{ inputs.image_ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image reference
+        id: img
+        run: |
+          if [ -n "${IMAGE_REF_INPUT}" ]; then
+            echo "ref=${IMAGE_REF_INPUT}" >> "$GITHUB_OUTPUT"
+          else
+            if [ -z "${DOCKERHUB_USERNAME}" ]; then
+              echo "DOCKERHUB_USERNAME secret is missing." >&2
+              exit 1
+            fi
+            echo "ref=docker.io/${DOCKERHUB_USERNAME}/secure-ml-api:${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Using image: $(cat $GITHUB_OUTPUT | sed -n 's/^ref=//p')"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Install kubectl, helm, cosign, yq
+        run: |
+          # kubectl
+          curl -sSL -o kubectl https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+          # cosign (latest)
+          COSIGN_VERSION=$(curl -s https://api.github.com/repos/sigstore/cosign/releases/latest | grep -Po '"tag_name":\s*"\K[^"]+')
+          curl -sL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o cosign
+          chmod +x cosign && sudo mv cosign /usr/local/bin/
+          # yq
+          curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq && sudo mv yq /usr/local/bin/
+
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig --region "${AWS_REGION}" --name "${CLUSTER_NAME}"
+
+      - name: Verify image signature with cosign (keyless, GitHub OIDC)
+        env:
+          IMAGE: ${{ steps.img.outputs.ref }}
+          # tighten these if you want to pin to your repo (recommended)
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          echo "Verifying signature for ${IMAGE}"
+          # Keyless verify: issued by GitHub OIDC for your repo
+          cosign verify \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}(/|$)" \
+            "${IMAGE}"
+
+      - name: Patch rollout.yaml with new image
+        id: patch
+        env:
+          IMAGE: ${{ steps.img.outputs.ref }}
+        run: |
+          # We assume rollout.yaml lives at repo root and container name is 'api'
+          test -f rollout.yaml || { echo "rollout.yaml not found at repo root"; exit 1; }
+          cp rollout.yaml rollout.patched.yaml
+          yq -i '
+            .spec.template.spec.containers
+            |= ( map( if .name == "api" then .image = env(IMAGE) else . end ) )
+          ' rollout.patched.yaml
+          echo "Patched rollout manifest:"
+          cat rollout.patched.yaml
+
+      - name: Apply rollout and show status
+        run: |
+          kubectl apply -f rollout.patched.yaml
+          kubectl -n secure-ml get rollout secure-ml-api -o yaml | head -n 50 || true
+          echo "Listing pods:"
+          kubectl -n secure-ml get pods -l app=secure-ml-api -o wide || true
