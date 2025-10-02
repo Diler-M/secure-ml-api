@@ -4,16 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       cluster_name:
-        description: "EKS cluster name (must already exist)"
+        description: "EKS cluster name (e.g. secure-ml-eks)"
         required: true
       aws_region:
         description: "AWS region"
         required: true
         default: "eu-west-2"
 
-# Minimal permissions for a checkout-only job
 permissions:
   contents: read
+  id-token: write
 
 env:
   CLUSTER_NAME: ${{ inputs.cluster_name }}
@@ -23,15 +23,12 @@ jobs:
   deploy-addons:
     name: Deploy Prometheus/Grafana + Falco
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---- CREDENTIALS ----
       - name: Configure AWS credentials
-        if: ${{ secrets.AWS_ACCESS_KEY_ID && secrets.AWS_SECRET_ACCESS_KEY }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -45,8 +42,7 @@ jobs:
           curl -sSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
       - name: Update kubeconfig for EKS
-        run: |
-          aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
 
       - name: Create namespaces
         run: |
@@ -93,28 +89,15 @@ jobs:
             --namespace monitoring \
             --values addons/values-kube-prometheus.yaml
 
-      - name: Install/Upgrade Falco (Discord alerts)
-        env:
-          FALCO_DISCORD_WEBHOOK: ${{ secrets.FALCO_DISCORD_WEBHOOK }}
+      - name: Install/Upgrade Falco
         run: |
-          if [ -z "$FALCO_DISCORD_WEBHOOK" ]; then
-            echo "NOTE: FALCO_DISCORD_WEBHOOK secret not set; installing Falco without Discord alerts."
-            helm upgrade --install falco falcosecurity/falco \
-              --namespace falco \
-              --values addons/values-falco.yaml
-          else
-            helm upgrade --install falco falcosecurity/falco \
-              --namespace falco \
-              --values addons/values-falco.yaml \
-              --set falcosidekick.enabled=true \
-              --set-string falcosidekick.config.discord.webhookurl="$FALCO_DISCORD_WEBHOOK"
-          fi
+          helm upgrade --install falco falcosecurity/falco \
+            --namespace falco \
+            --values addons/values-falco.yaml
 
-      - name: Show services and Falco status
+      - name: Show services
         run: |
           echo "--- monitoring services ---"
           kubectl get svc -n monitoring
-          echo "--- falco workload ---"
-          kubectl get all -n falco
-          echo "--- falco logs (recent) ---"
-          kubectl logs -n falco daemonset/falco --tail=50 || true
+          echo "--- falco daemonset ---"
+          kubectl get ds -n falco

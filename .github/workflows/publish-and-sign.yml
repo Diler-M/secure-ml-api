@@ -15,7 +15,7 @@ permissions:
   id-token: write
 
 env:
-  IMAGE_NAME: YOUR_DOCKERHUB_USERNAME/secure-ml-api
+  IMAGE_NAME: dilerm/secure-ml-api
   IMAGE_TAG: latest
 
 jobs:
