@@ -18,7 +18,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
       - name: api
-        image: <dilerm>/secure-ml-api:latest
+        image: dilerm/secure-ml-api:latest
         ports: [{ containerPort: 8000 }]
         env:
         - name: JWT_SECRET
