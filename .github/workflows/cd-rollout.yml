@@ -2,7 +2,7 @@ name: CD – Update Argo Rollout on New Signed Image
 
 on:
   workflow_run:
-    workflows: ["Publish & Sign (Cosign keyless)"]
+    workflows: ["Publish & Sign Container"]
     types: [completed]
     branches: [main]
 
