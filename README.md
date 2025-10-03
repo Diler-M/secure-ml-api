@@ -81,6 +81,7 @@ flowchart LR
     Pod --> Metrics[Prometheus/Grafana]
     Pod --> Falco[Runtime Detection]
 ```
+
 ## 🔐 Security Governance
 
 - **SAST**: CodeQL uploads SARIF to GitHub Security tab  
