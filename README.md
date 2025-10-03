@@ -93,6 +93,10 @@ flowchart LR
 - **Deployment Controls**: Argo Rollouts verifies signed images before rollout  
 - **Identity & Access**: GitHub Actions authenticates to AWS using **OIDC federated roles**, eliminating static AWS secrets.
 
+## Threat Model
+
+A detailed threat model for this project (including OWASP Top 10 and cloud/Kubernetes-specific risks) is documented in [**ThreatModel.md**](https://github.com/Diler-M/secure-ml-api/blob/main/ThreatModel.md).
+
 ## ⚙️ Tech Stack
 
 - **API**: Python 3.11, FastAPI, VADER sentiment analysis  
