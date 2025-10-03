@@ -2,12 +2,14 @@ name: DevSecOps Pipeline (EKS)
 
 on:
   push:
-    branches: [ "main", "part-2" ]
+    branches: ["main", "part-2"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
-
-permissions: {}
+    
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
   codeql:
@@ -91,7 +93,7 @@ jobs:
         run: |
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            anchore/syft:latest packages docker:secure-ml-api:latest -o spdx-json > sbom.spdx.json
+            anchore/syft:latest scan docker:secure-ml-api:latest -o spdx-json > sbom.spdx.json
 
       - name: Upload SBOM
         uses: actions/upload-artifact@v4
@@ -106,9 +108,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AWS_REGION: eu-west-2
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
@@ -116,15 +117,18 @@ jobs:
       TF_VAR_cluster_name: "secure-ml-eks"
       TF_VAR_vpc_cidr: "10.0.0.0/16"
       TF_VAR_tags: '{"Project":"secure-ml-api","Env":"dev"}'
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS region for CLI
-        run: |
-          aws --version
-          aws configure set region "$AWS_REGION"
+      - name: Configure AWS credentials (OIDC, read-only)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::535537926556:role/GitHubActions-secure-ml-ro
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Who am I?
+        run: aws sts get-caller-identity
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -132,7 +136,6 @@ jobs:
           terraform_version: 1.6.6
           terraform_wrapper: false
 
-      # Auto-format instead of failing the build
       - name: Terraform fmt (auto-fix)
         working-directory: terraform-eks
         run: terraform fmt -recursive -diff

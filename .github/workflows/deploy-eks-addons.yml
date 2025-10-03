@@ -1,4 +1,4 @@
-name: Deploy EKS Addons (Prometheus, Grafana, Falco, optional Argo Rollouts & Ingress-NGINX)
+name: Deploy EKS Addons (Prometheus, Grafana, Falco)
 
 on:
   workflow_dispatch:
@@ -10,19 +10,10 @@ on:
         description: "AWS region"
         required: true
         default: "eu-west-2"
-      install_argo_rollouts:
-        description: "Install Argo Rollouts controller?"
-        required: true
-        type: boolean
-        default: false
-      install_ingress_nginx:
-        description: "Install ingress-nginx controller?"
-        required: true
-        type: boolean
-        default: false
 
 permissions:
   contents: read
+  id-token: write
 
 env:
   CLUSTER_NAME: ${{ inputs.cluster_name }}
@@ -30,41 +21,38 @@ env:
 
 jobs:
   deploy-addons:
-    name: Deploy Prometheus/Grafana + Falco (+ optional Argo Rollouts & Ingress)
+    name: Deploy Prometheus/Grafana + Falco
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC for EKS)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::535537926556:role/GitHubActions-secure-ml-eks
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Install kubectl and helm
         run: |
-          set -e
           curl -sSL -o kubectl https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl
           chmod +x kubectl && sudo mv kubectl /usr/local/bin/
           curl -sSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
       - name: Update kubeconfig for EKS
-        run: |
-          set -e
-          aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
 
       - name: Create namespaces
         run: |
-          set -e
           kubectl get ns monitoring >/dev/null 2>&1 || kubectl create ns monitoring
           kubectl get ns falco >/dev/null 2>&1 || kubectl create ns falco
 
       - name: Write values files
         run: |
-          set -e
           mkdir -p addons
           cat > addons/values-kube-prometheus.yaml << 'EOF'
           grafana:
@@ -93,55 +81,25 @@ jobs:
 
       - name: Add Helm repos
         run: |
-          set -e
           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
           helm repo add falcosecurity https://falcosecurity.github.io/charts
-          # Optional repos are added now (installs gated by inputs)
-          helm repo add argo https://argoproj.github.io/argo-helm
-          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
           helm repo update
 
       - name: Install/Upgrade kube-prometheus-stack
         run: |
-          set -e
           helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
             --namespace monitoring \
             --values addons/values-kube-prometheus.yaml
 
       - name: Install/Upgrade Falco
         run: |
-          set -e
           helm upgrade --install falco falcosecurity/falco \
             --namespace falco \
             --values addons/values-falco.yaml
 
-      - name: (Optional) Install/Upgrade Argo Rollouts
-        if: ${{ inputs.install_argo_rollouts }}
-        run: |
-          set -e
-          kubectl get ns argo-rollouts >/dev/null 2>&1 || kubectl create ns argo-rollouts
-          helm upgrade --install argo-rollouts argo/argo-rollouts -n argo-rollouts
-          # Optionally install the kubectl plugin (handy for debugging):
-          # curl -sLO https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64
-          # chmod +x kubectl-argo-rollouts-linux-amd64 && sudo mv kubectl-argo-rollouts-linux-amd64 /usr/local/bin/kubectl-argo-rollouts
-
-      - name: (Optional) Install/Upgrade ingress-nginx
-        if: ${{ inputs.install_ingress_nginx }}
-        run: |
-          set -e
-          kubectl get ns nginx-ingress >/dev/null 2>&1 || kubectl create ns nginx-ingress
-          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
-            -n nginx-ingress \
-            --set controller.metrics.enabled=true \
-            --set controller.admissionWebhooks.enabled=true
-
-      - name: Show services / controllers
+      - name: Show services
         run: |
           echo "--- monitoring services ---"
           kubectl get svc -n monitoring
           echo "--- falco daemonset ---"
           kubectl get ds -n falco
-          echo "--- argo-rollouts (if installed) ---"
-          kubectl get deploy -n argo-rollouts || true
-          echo "--- ingress-nginx (if installed) ---"
-          kubectl get deploy -n nginx-ingress || true

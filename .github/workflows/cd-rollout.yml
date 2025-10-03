@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 env:
   AWS_REGION: eu-west-2
@@ -22,18 +23,16 @@ jobs:
     name: Verify Signature → (If cluster exists) Patch Rollout
     runs-on: ubuntu-latest
 
-    # Only run this job if the upstream workflow succeeded
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC for EKS)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::535537926556:role/GitHubActions-secure-ml-eks
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Install kubectl, helm, cosign
@@ -50,8 +49,6 @@ jobs:
         id: tag
         run: |
           set -e
-          # Try to read a tag artifact name pattern like "secure-ml-api:sha-xxxx" if your publish job uploaded it.
-          # If none available, fall back to $IMAGE_TAG
           echo "value=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Cosign verify (keyless)
@@ -60,7 +57,6 @@ jobs:
           IMG: ${{ env.IMAGE_REPO }}:${{ steps.tag.outputs.value }}
         run: |
           echo "Verifying ${IMG}"
-          # This will succeed only if the image was signed keyless by your publish workflow
           cosign verify "${IMG}" --certificate-identity-regexp '.*' --certificate-oidc-issuer-regexp '.*'
 
       - name: Probe cluster existence
@@ -91,10 +87,8 @@ jobs:
           IMG: ${{ env.IMAGE_REPO }}:${{ steps.tag.outputs.value }}
         run: |
           set -e
-          # If you use Argo Rollouts CRD:
           kubectl -n "${NAMESPACE}" set image rollout/${ROLLOUT_NAME} api="${IMG}"
           kubectl -n "${NAMESPACE}" rollout status rollout/${ROLLOUT_NAME} --timeout=10m
-
-          # If you're using a standard Deployment instead, comment the two lines above and use:
+          # For Deployment users, use:
           # kubectl -n "${NAMESPACE}" set image deploy/${ROLLOUT_NAME} api="${IMG}"
           # kubectl -n "${NAMESPACE}" rollout status deploy/${ROLLOUT_NAME} --timeout=10m
