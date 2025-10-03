@@ -4,11 +4,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from pydantic import BaseModel
-from transformers import pipeline
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.middleware import SlowAPIMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import os, time, hashlib, jwt
 
 # ====== Config ======
@@ -36,7 +36,7 @@ def current_user(token: str = Depends(oauth2)) -> str:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
 # ====== FastAPI App ======
-app = FastAPI(title="Secure ML API")
+app = FastAPI(title="Secure ML API (VADER)")
 
 # CORS (tighten in prod)
 app.add_middleware(
@@ -86,11 +86,21 @@ def token(form: OAuth2PasswordRequestForm = Depends()):
         raise HTTPException(status_code=400, detail="Invalid credentials")
     return {"access_token": create_token(form.username)}
 
-# ML inference
-clf = pipeline("sentiment-analysis", device=-1)
+# ====== Sentiment (VADER) ======
+_analyzer = SentimentIntensityAnalyzer()
+
+def _label_from_compound(c: float) -> str:
+    # VADER convention-ish thresholds
+    if c >= 0.05:
+        return "POSITIVE"
+    if c <= -0.05:
+        return "NEGATIVE"
+    return "NEUTRAL"
 
 @app.post("/predict")
 @limiter.limit("30/minute")
 def predict(body: PredictIn, user: str = Depends(current_user)):
-    out = clf(body.text)[0]
-    return {"user": user, "label": out["label"], "score": float(out["score"])}
+    scores = _analyzer.polarity_scores(body.text)
+    label = _label_from_compound(scores["compound"])
+    score = float(scores["compound"])
+    return {"user": user, "label": label, "score": score}
