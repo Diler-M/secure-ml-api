@@ -22,7 +22,6 @@ This project originally started as **V1** (FastAPI + Hugging Face Transformers +
 - **Switched from Hugging Face Transformers → VADER sentiment analysis**
   - Hugging Face added 1GB+ image size, slow builds, heavy dependencies.
   - VADER is lightweight (~20MB), keeps demo fast & reproducible.
-  - Showcases ability to **optimise for security & performance**.
 
 - **ECS → EKS migration**
   - Kubernetes offers advanced deployment strategies (Argo Rollouts).
@@ -139,18 +138,6 @@ GitHub Actions uses **OIDC federation** to assume two short-lived AWS IAM roles:
 - Require PR approval  
 - Require status checks (CodeQL, Trivy, Checkov, Dependency Review)  
 - Prevent unsigned containers from being deployed  
-
-## 🔄 CI/CD Pipeline
-
-**Triggered on push to `main`:**
-
-1. **CodeQL** → Static code analysis (SAST)  
-2. **Trivy** → Vulnerability scanning (image & IaC)  
-3. **Checkov** → Terraform policy compliance  
-4. **SBOM** → Generate SPDX JSON artifact  
-5. **Terraform Plan** → Infra drift preview (manual apply only)  
-6. **Build → Push → Sign** → Docker Hub + Cosign keyless signing (OIDC)
-7. **CD Rollout** → Signature verification + Canary rollout (if cluster exists)  
 
 ## ☁️ Terraform Deployment (Optional)
 

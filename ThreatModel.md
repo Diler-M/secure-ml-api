@@ -10,7 +10,7 @@ The goal is to document potential threats, risks, and mitigations across the app
 
 - **Application**: FastAPI ML API using VADER sentiment analysis  
 - **Authentication**: JWT bearer tokens (short-lived)  
-- **Containerization**: Docker (slim, non-root, read-only FS)  
+- **Containerisation**: Docker (slim, non-root, read-only FS)  
 - **Infrastructure**: AWS EKS (private endpoints, KMS for secrets, Terraform IaC)  
 - **CI/CD**: GitHub Actions (DevSecOps pipeline)  
 - **Supply Chain Security**: Cosign keyless signing (GitHub OIDC)  
@@ -20,16 +20,6 @@ The goal is to document potential threats, risks, and mitigations across the app
 ---
 
 ## 🗂 STRIDE Threat Analysis
-
-```mermaid
-flowchart TD
-    S[Spoofing] -->|JWT auth, OIDC roles| M1[Mitigated]
-    T[Tampering] -->|Cosign signing, Checkov IaC| M2[Mitigated]
-    R[Repudiation] -->|CloudTrail, GH logs| M3[Mitigated]
-    I[Info Disclosure] -->|KMS, no static keys, headers| M4[Mitigated]
-    D[Denial of Service] -->|Rate limiting, HPA| M5[Mitigated]
-    E[Elevation of Privilege] -->|Non-root pods, Falco, Seccomp| M6[Mitigated]
-```
 
 ### 1. **Spoofing Identity**
 - **Threat**: API endpoints accessed without authentication.  
@@ -62,7 +52,7 @@ flowchart TD
 - **Mitigation**:  
   - Rate limiting with `slowapi`.  
   - No sensitive data in responses.  
-  - Security headers enforced (CSP, Referrer-Policy, etc.).  
+  - Security headers enforced.
 
 - **Threat**: Long-lived AWS IAM keys leaked from GitHub.  
 - **Mitigation**:  
@@ -76,7 +66,6 @@ flowchart TD
 - **Threat**: Attackers flood API.  
 - **Mitigation**:  
   - Rate limiting (`60/min` global, `10/min` for token issuance).  
-  - HPA autoscaling for workloads.  
 
 - **Threat**: Resource exhaustion in CI/CD (e.g., dependency bombs).  
 - **Mitigation**: Timeout and job limits in workflows.
@@ -86,10 +75,9 @@ flowchart TD
 ### 6. **Elevation of Privilege**
 - **Threat**: Compromised pod escalates privileges in cluster.  
 - **Mitigation**:  
-  - Pods run as **non-root**, drop all Linux capabilities.  
-  - Seccomp/RuntimeDefault applied.  
+  - Pods run as **non-root**, drop all Linux capabilities.    
   - NetworkPolicy restricts ingress.  
-  - Falco detects privilege escalation attempts.  
+  - Falco detects privilege escalation attempts.
 
 ---
 
@@ -97,7 +85,7 @@ flowchart TD
 
 | OWASP Top 10 | Risk in this project | Mitigations |
 |--------------|---------------------|-------------|
-| A01: Broken Access Control | Unauthorized API access | JWT auth, NetworkPolicy |
+| A01: Broken Access Control | Unauthorised API access | JWT auth, NetworkPolicy |
 | A02: Cryptographic Failures | Weak key handling | KMS for secrets, no hardcoded keys |
 | A03: Injection | Input misuse in ML model | Pydantic validation |
 | A04: Insecure Design | Insecure defaults | Non-root pods, read-only FS |
