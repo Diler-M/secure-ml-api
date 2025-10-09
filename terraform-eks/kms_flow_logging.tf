@@ -1,130 +1,106 @@
-############################################################
-# CloudWatch Logs + KMS for VPC Flow Logs
-############################################################
+# Inputs
+variable "vpc_id" {
+  description = "VPC ID to enable Flow Logs on"
+  type        = string
+}
 
-# Required identity/region data
-data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
+variable "kms_key_alias" {
+  description = "Alias for the KMS key used to encrypt CloudWatch Logs"
+  type        = string
+  default     = "alias/flow-logs"
+}
 
-# KMS policy for CloudWatch Logs
-data "aws_iam_policy_document" "kms_cloudwatch_logs" {
-  # Admin (resource-scoped to keys in this account/region)
-  statement {
-    sid     = "EnableAccountAdminForThisKey"
-    effect  = "Allow"
-    principals {
-      type        = "AWS"
-      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
-    }
-    actions = [
-      "kms:Create*",
-      "kms:Describe*",
-      "kms:Enable*",
-      "kms:List*",
-      "kms:Put*",
-      "kms:Update*",
-      "kms:Revoke*",
-      "kms:Disable*",
-      "kms:Get*",
-      "kms:Delete*",
-      "kms:ScheduleKeyDeletion",
-      "kms:CancelKeyDeletion"
-    ]
-    resources = ["arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:key/*"]
+variable "flow_logs_log_group_name" {
+  description = "Name of the CloudWatch Log Group for VPC Flow Logs"
+  type        = string
+  default     = "/aws/vpc/flow-logs"
+}
+
+variable "retention_days" {
+  description = "CloudWatch Logs retention (days)"
+  type        = number
+  default     = 30
+}
+
+variable "tags" {
+  description = "Tags to apply to created resources"
+  type        = map(string)
+  default     = {
+    Project = "secure-ml-api"
+    Env     = "dev"
   }
+}
 
-  # Allow CloudWatch Logs service to use the key
+data "aws_caller_identity" "current" {}
+data "aws_region"          "current" {}
+data "aws_partition"       "current" {}
+
+data "aws_kms_key" "flow_logs" {
+  key_id = var.kms_key_alias
+}
+
+
+# CloudWatch Log Group (KMS)
+resource "aws_cloudwatch_log_group" "vpc_flow_logs" {
+  name              = var.flow_logs_log_group_name
+  kms_key_id        = data.aws_kms_key.flow_logs.arn
+  retention_in_days = var.retention_days
+  tags              = var.tags
+}
+
+# IAM role for VPC Flow Logs -> CW Logs #
+data "aws_iam_policy_document" "flow_logs_assume_role" {
   statement {
-    sid    = "AllowCloudWatchLogsUseOfKey"
-    effect = "Allow"
+    actions = ["sts:AssumeRole"]
     principals {
       type        = "Service"
-      identifiers = ["logs.${data.aws_region.current.name}.amazonaws.com"]
-    }
-    actions = [
-      "kms:Encrypt",
-      "kms:Decrypt",
-      "kms:ReEncrypt*",
-      "kms:GenerateDataKey*",
-      "kms:DescribeKey",
-      "kms:CreateGrant"
-    ]
-    resources = ["arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:key/*"]
-
-    # Keep grants constrained to AWS resources
-    condition {
-      test     = "Bool"
-      variable = "kms:GrantIsForAWSResource"
-      values   = ["true"]
-    }
-    # Constrain to our account
-    condition {
-      test     = "StringEquals"
-      variable = "kms:CallerAccount"
-      values   = [data.aws_caller_identity.current.account_id]
+      identifiers = ["vpc-flow-logs.amazonaws.com"]
     }
   }
 }
 
-resource "aws_kms_key" "cloudwatch_logs" {
-  description             = "KMS key for CloudWatch log encryption"
-  deletion_window_in_days = 7
-  enable_key_rotation     = true
-  policy                  = data.aws_iam_policy_document.kms_cloudwatch_logs.json
-  tags                    = merge(var.tags, { Name = "cw-logs-kms" })
+resource "aws_iam_role" "flow_logs" {
+  name               = "vpc-flow-logs-to-cw"
+  assume_role_policy = data.aws_iam_policy_document.flow_logs_assume_role.json
+  tags               = var.tags
 }
 
-resource "aws_cloudwatch_log_group" "vpc_flow_with_kms" {
-  name              = "/aws/vpc/flow-logs"
-  retention_in_days = 400
-  kms_key_id        = aws_kms_key.cloudwatch_logs.arn
-  tags              = merge(var.tags, { Name = "vpc-flow-logs" })
-}
-
-# IAM role to allow VPC Flow Logs service to write to CWL
-resource "aws_iam_role" "vpc_flow" {
-  name = "vpc-flow-logs-role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow",
-      Principal = { Service = "vpc-flow-logs.amazonaws.com" },
-      Action    = "sts:AssumeRole"
-    }]
-  })
-  tags = merge(var.tags, { Name = "vpc-flow-logs-role" })
-}
-
-resource "aws_iam_role_policy" "vpc_flow" {
-  name = "vpc-flow-logs-policy"
-  role = aws_iam_role.vpc_flow.id
-
-  policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [
-      {
-        Sid    = "WriteToCloudWatchLogs",
-        Effect = "Allow",
-        Action = [
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents",
-          "logs:DescribeLogGroups",
-          "logs:DescribeLogStreams"
-        ],
-        Resource = "${aws_cloudwatch_log_group.vpc_flow_with_kms.arn}:*"
-      }
+data "aws_iam_policy_document" "flow_logs_write" {
+  statement {
+    sid = "CWLogsWrite"
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:DescribeLogGroups",
+      "logs:DescribeLogStreams",
+      "logs:PutLogEvents"
     ]
-  })
+
+    resources = [
+      aws_cloudwatch_log_group.vpc_flow_logs.arn,
+      "${aws_cloudwatch_log_group.vpc_flow_logs.arn}:*"
+    ]
+  }
 }
 
-# VPC Flow Logs -> CloudWatch Logs
+resource "aws_iam_role_policy" "flow_logs" {
+  name   = "vpc-flow-logs-write"
+  role   = aws_iam_role.flow_logs.id
+  policy = data.aws_iam_policy_document.flow_logs_write.json
+}
+
+
+# VPC Flow Logs enable
 resource "aws_flow_log" "vpc" {
-  vpc_id               = aws_vpc.eks.id
-  log_destination      = aws_cloudwatch_log_group.vpc_flow_with_kms.arn
-  log_destination_type = "cloud-watch-logs"
-  iam_role_arn         = aws_iam_role.vpc_flow.arn   # <- replaced deliver_logs_permission_arn
+  vpc_id               = var.vpc_id
   traffic_type         = "ALL"
 
-  tags = merge(var.tags, { Name = "vpc-flow-logs" })
+  log_destination_type = "cloud-watch-logs"
+  log_group_name       = aws_cloudwatch_log_group.vpc_flow_logs.name
+  iam_role_arn         = aws_iam_role.flow_logs.arn
+
+
+  log_format = "$${version} $${account-id} $${interface-id} $${srcaddr} $${dstaddr} $${srcport} $${dstport} $${protocol} $${packets} $${bytes} $${start} $${end} $${action} $${log-status}"
+
+  tags = var.tags
 }
