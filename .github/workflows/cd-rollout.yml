@@ -20,9 +20,8 @@ env:
 
 jobs:
   rollout:
-    name: Verify Signature → (If cluster exists) Patch Rollout
+    name: Verify Signature → Create/Update Secret → (If cluster exists) Patch Rollout
     runs-on: ubuntu-latest
-
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
@@ -80,6 +79,20 @@ jobs:
         if: ${{ steps.probe.outputs.exists == 'true' }}
         run: |
           aws eks update-kubeconfig --region "${AWS_REGION}" --name "${CLUSTER_NAME}"
+
+      - name: Create/Update jwt-secret from GitHub Actions secret
+        if: ${{ steps.probe.outputs.exists == 'true' }}
+        env:
+          GITHUB_JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          set -e
+          if [ -z "${GITHUB_JWT_SECRET}" ]; then
+            echo "::error::Missing repository secret JWT_SECRET"
+            exit 1
+          fi
+          kubectl -n "${NAMESPACE}" delete secret jwt-secret --ignore-not-found
+          kubectl -n "${NAMESPACE}" create secret generic jwt-secret \
+            --from-literal=JWT_SECRET="${GITHUB_JWT_SECRET}"
 
       - name: Patch Argo Rollout image
         if: ${{ steps.probe.outputs.exists == 'true' }}

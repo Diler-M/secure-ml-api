@@ -3,8 +3,20 @@ kind: Rollout
 metadata:
   name: secure-ml-api
   namespace: secure-ml
+  labels:
+    app.kubernetes.io/name: secure-ml-api
+    app.kubernetes.io/part-of: secure-ml
 spec:
   replicas: 2
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    canary:
+      steps:
+        - setWeight: 50
+        - pause: { duration: 30s }
+        - setWeight: 100
   selector:
     matchLabels:
       app: secure-ml-api
@@ -13,39 +25,48 @@ spec:
       labels:
         app: secure-ml-api
     spec:
-      securityContext:
-        runAsNonRoot: true
-        seccompProfile: { type: RuntimeDefault }
       containers:
-      - name: api
-        image: dilerm/secure-ml-api:latest
-        ports: [{ containerPort: 8000 }]
-        env:
-        - name: JWT_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: jwt-secret
-              key: JWT_SECRET
-        resources:
-          requests: { cpu: "200m", memory: "256Mi" }
-          limits:   { cpu: "500m", memory: "512Mi" }
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          capabilities: { drop: ["ALL"] }
-        readinessProbe:
-          httpGet: { path: /healthz, port: 8000 }
-          initialDelaySeconds: 5
-          periodSeconds: 5
-        livenessProbe:
-          httpGet: { path: /healthz, port: 8000 }
-          initialDelaySeconds: 10
-          periodSeconds: 10
-  strategy:
-    canary:
-      steps:
-      - setWeight: 20
-      - pause: { duration: 180 }
-      - setWeight: 50
-      - pause: { duration: 300 }
-      - setWeight: 100
+        - name: api
+
+          image: docker.io/REPLACE_AT_RUNTIME/secure-ml-api:latest
+          imagePullPolicy: IfNotPresent
+
+
+          env:
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: jwt-secret
+                  key: JWT_SECRET
+
+
+          ports:
+            - name: http
+              containerPort: 8000
+
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
