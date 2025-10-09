@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: ["main"]
   workflow_dispatch:
-    
+
 permissions:
   contents: read
   id-token: write
@@ -124,7 +124,7 @@ jobs:
       - name: Configure AWS credentials (OIDC, read-only)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::535537926556:role/GitHubActions-secure-ml-ro
+          role-to-assume: ${{ secrets.AWS_RO_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Who am I?

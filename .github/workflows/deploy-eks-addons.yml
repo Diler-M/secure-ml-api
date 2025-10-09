@@ -18,6 +18,7 @@ permissions:
 env:
   CLUSTER_NAME: ${{ inputs.cluster_name }}
   AWS_REGION: ${{ inputs.aws_region }}
+  GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASS }}
 
 jobs:
   deploy-addons:
@@ -34,7 +35,7 @@ jobs:
       - name: Configure AWS credentials (OIDC for EKS)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::535537926556:role/GitHubActions-secure-ml-eks
+          role-to-assume: ${{ secrets.AWS_EKS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Install kubectl and helm
@@ -51,13 +52,12 @@ jobs:
           kubectl get ns monitoring >/dev/null 2>&1 || kubectl create ns monitoring
           kubectl get ns falco >/dev/null 2>&1 || kubectl create ns falco
 
-      - name: Write values files
+      - name: Write values files (no secrets inside)
         run: |
           mkdir -p addons
           cat > addons/values-kube-prometheus.yaml << 'EOF'
           grafana:
             enabled: true
-            adminPassword: admin
             service:
               type: ClusterIP
             ingress:
@@ -85,11 +85,12 @@ jobs:
           helm repo add falcosecurity https://falcosecurity.github.io/charts
           helm repo update
 
-      - name: Install/Upgrade kube-prometheus-stack
+      - name: Install/Upgrade kube-prometheus-stack (admin password via secret)
         run: |
           helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
             --namespace monitoring \
-            --values addons/values-kube-prometheus.yaml
+            --values addons/values-kube-prometheus.yaml \
+            --set grafana.adminPassword="${GRAFANA_ADMIN_PASSWORD}"
 
       - name: Install/Upgrade Falco
         run: |
