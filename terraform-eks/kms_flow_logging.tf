@@ -1,44 +1,26 @@
-# Look up KMS key by alias
-variable "kms_key_alias" {
-  description = "Alias for the KMS key used to encrypt CloudWatch Logs"
-  type        = string
-  default     = "alias/flow-logs"
+# Locals & Data
+locals {
+  # You can change these defaults here or expose them as variables in variables.tf if you prefer.
+  kms_key_alias            = "alias/flow-logs"
+  flow_logs_log_group_name = "/aws/vpc/flow-logs"
+  retention_days           = 400  # ≥ 365 to satisfy CKV_AWS_338
 }
 
+# Look up KMS key by alias (no ARNs/account IDs committed)
 data "aws_kms_key" "flow_logs" {
-  key_id = var.kms_key_alias
+  key_id = local.kms_key_alias
 }
 
-variable "retention_days" {
-  description = "CloudWatch Logs retention (days)"
-  type        = number
-  default     = 400
-}
-
-variable "flow_logs_log_group_name" {
-  description = "CloudWatch Log Group name for VPC Flow Logs"
-  type        = string
-  default     = "/aws/vpc/flow-logs"
-}
-
-variable "tags" {
-  description = "Common tags"
-  type        = map(string)
-  default     = {
-    Project = "secure-ml-api"
-    Env     = "dev"
-  }
-}
-
-# CloudWatch Log Group encrypted by KMS
+# CloudWatch Log Group (KMS)
 resource "aws_cloudwatch_log_group" "eks_vpc_flow_logs" {
-  name              = var.flow_logs_log_group_name
+  name              = local.flow_logs_log_group_name
   kms_key_id        = data.aws_kms_key.flow_logs.arn
-  retention_in_days = var.retention_days
+  retention_in_days = local.retention_days
   tags              = var.tags
 }
 
-# IAM role Flow Logs -> CloudWatch Logs
+
+# IAM role for VPC Flow Logs -> CW Logs
 data "aws_iam_policy_document" "flow_logs_assume_role" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -78,6 +60,7 @@ resource "aws_iam_role_policy" "eks_vpc_flow_logs" {
   policy = data.aws_iam_policy_document.flow_logs_write.json
 }
 
+# VPC Flow Logs enable
 resource "aws_flow_log" "eks_vpc" {
   vpc_id               = aws_vpc.eks.id
   traffic_type         = "ALL"
@@ -86,7 +69,7 @@ resource "aws_flow_log" "eks_vpc" {
   log_group_name       = aws_cloudwatch_log_group.eks_vpc_flow_logs.name
   iam_role_arn         = aws_iam_role.eks_vpc_flow_logs.arn
 
-  # Optional: keep/tweak if you like
+
   log_format = "$${version} $${account-id} $${interface-id} $${srcaddr} $${dstaddr} $${srcport} $${dstport} $${protocol} $${packets} $${bytes} $${start} $${end} $${action} $${log-status}"
 
   tags = var.tags
